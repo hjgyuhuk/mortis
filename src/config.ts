@@ -74,11 +74,13 @@ export function resolveConfig(overrides: Partial<Config> = {}): Config {
 }
 
 /** Default system prompt describing the agent's tools and behavior. */
-export function defaultSystemPrompt(): string {
-  return [
+export function defaultSystemPrompt(agentsMd?: string): string {
+  const base = [
     'You are Mortis, a coding agent. You help the user solve tasks in their repository.',
     'Use the available tools (read, write, edit, bash) to inspect and modify files.',
     'Prefer reading files before editing them. When the task is done, answer with a',
     'concise summary of what you changed.',
   ].join('\n')
+  if (!agentsMd) return base
+  return base + '\n\n' + agentsMd
 }

@@ -13,6 +13,7 @@ import { OpenAIProvider } from './provider/openai.js'
 import { builtinTools } from './tools/index.js'
 import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, writeFileConfig, type Config } from './config.js'
 import { AgentTui } from './tui/index.js'
+import { loadAgentsMd } from './instructions.js'
 
 function parseCliArgs(argv: string[]) {
   const parsed = parseArgs({
@@ -88,6 +89,7 @@ async function main() {
   ensureFileConfig(config)
   const provider = new OpenAIProvider(config)
   const useTui = !values.plain
+  const agentsMd = loadAgentsMd(process.cwd())
 
   // Interactive mode: `pnpm dev` with no prompt drops straight into the TUI,
   // where the prompt is typed in the input box. Model/provider come from the
@@ -97,7 +99,7 @@ async function main() {
     const agent = new Agent({
       provider,
       tools: builtinTools,
-      systemPrompt: defaultSystemPrompt(),
+      systemPrompt: defaultSystemPrompt(agentsMd),
       onEvent: (event) => tui.handle(event),
     })
     await tui.startInteractive((prompt) => agent.run(prompt))
@@ -116,7 +118,7 @@ async function main() {
     const agent = new Agent({
       provider,
       tools: builtinTools,
-      systemPrompt: defaultSystemPrompt(),
+      systemPrompt: defaultSystemPrompt(agentsMd),
       onEvent: (event) => tui.handle(event),
     })
     try {
@@ -131,7 +133,7 @@ async function main() {
   const agent = new Agent({
     provider,
     tools: builtinTools,
-    systemPrompt: defaultSystemPrompt(),
+    systemPrompt: defaultSystemPrompt(agentsMd),
   })
   console.log(`mortis: talking to ${config.model} @ ${config.baseUrl}`)
   const answer = await agent.run(prompt)
