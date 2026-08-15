@@ -1,0 +1,52 @@
+/**
+ * Shared types for the agent loop, provider, and tools.
+ *
+ * These mirror the wire vocabulary of an OpenAI-compatible chat API so the
+ * provider layer can translate them directly.
+ */
+
+/** A single message in the conversation. */
+export type Message =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
+
+/** A tool invocation requested by the model. */
+export interface ToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
+/** A tool the model may call. */
+export interface Tool {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  /** Execute the tool with parsed arguments. */
+  execute(args: Record<string, unknown>): Promise<string>
+}
+
+/** A single model response, either text or tool calls. */
+export type ModelResponse =
+  | { kind: 'text'; content: string }
+  | { kind: 'tool_calls'; tool_calls: ToolCall[] }
+
+/** One chunk of a streamed model response. */
+export type StreamChunk =
+  | { kind: 'text'; delta: string }
+  | { kind: 'tool_calls'; tool_calls: ToolCall[] }
+
+/** The provider abstraction — one method, the streamed chat completion. */
+export interface ChatProvider {
+  /**
+   * Send the conversation and stream the next model response. A text reply
+   * arrives as one or more text deltas; a tool request is emitted once, after
+   * any text deltas, as a single tool_calls chunk.
+   */
+  completeStream(messages: Message[], tools: Tool[]): AsyncIterable<StreamChunk>
+}
