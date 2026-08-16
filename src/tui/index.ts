@@ -134,6 +134,56 @@ interface ToolRow {
   label: string
 }
 
+/**
+ * A horizontal row of selectable choices: up/down (and left/right) move the
+ * selection, Enter confirms. Focused while the ask-user panel is open.
+ */
+export class OptionsBar {
+  /** Set by the TUI when focused. */
+  focused = false
+  private index = 0
+
+  constructor(
+    private readonly options: string[],
+    private readonly onSelect: (choice: string) => void,
+    private readonly requestRender: () => void,
+  ) {}
+
+  invalidate(): void {
+    // No cached render state.
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, 'up') || matchesKey(data, 'left')) {
+      this.index = (this.index - 1 + this.options.length) % this.options.length
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'down') || matchesKey(data, 'right')) {
+      this.index = (this.index + 1) % this.options.length
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      this.onSelect(this.options[this.index] ?? this.options[0] ?? '')
+    }
+  }
+
+  /** The currently highlighted choice. */
+  get selected(): string {
+    return this.options[this.index] ?? ''
+  }
+
+  render(width: number): string[] {
+    const cells = this.options.map((option, index) => {
+      const label = ` ${option} `
+      const cell = index === this.index ? `\u001b[7m${theme.bold(label)}\u001b[27m` : theme.muted(label)
+      return `[${cell}]`
+    })
+    return [truncateToWidth(cells.join('   '), width)]
+  }
+}
+
 export class AgentTui {
   private readonly terminal: ProcessTerminal
   private readonly ui: TuiMainScreen | TuiAltScreen
@@ -145,6 +195,10 @@ export class AgentTui {
   private readonly thinkingPreview = new Text('', 1, 0)
   private pendingThinking = ''
   private readonly editor?: Editor
+  /** Interactive layout root; the ask panel is inserted/removed dynamically. */
+  private readonly rootLayout = new VStack([])
+  /** Open ask-user panel, when waiting for a choice. */
+  private pendingAsk: { close: (choice: string) => void } | null = null
   /** Tool rows in flight, keyed by tool call id (parallel tools interleave). */
   private readonly rows = new Map<string, ToolRow>()
   private loaderActive = false
@@ -184,16 +238,18 @@ export class AgentTui {
       bottom.addChild(statusRow)
       bottom.addChild(this.thinkingPreview)
       bottom.addChild(new FramedEditor(editor, theme.muted))
-      ui.setLayoutRoot(
-        new VStack([
-          { component: header, basis: 'auto', shrink: 0, minSize: 1 },
-          // basis 'auto' (not 0): the live viewport shrinks this region to the
-          // terminal height, while the unbounded direct render — used when the
-          // alt screen prints the final transcript on exit — keeps full content.
-          { component: new ScrollView(this.answers, { follow: 'end', primary: true }), basis: 'auto', grow: 1, shrink: 1, minSize: 1 },
-          { component: bottom, basis: 'auto', shrink: 0, minSize: 1 },
-        ]),
-      )
+      this.rootLayout.addChild(header, { basis: 'auto', shrink: 0, minSize: 1 })
+      // basis 'auto' (not 0): the live viewport shrinks this region to the
+      // terminal height, while the unbounded direct render — used when the
+      // alt screen prints the final transcript on exit — keeps full content.
+      this.rootLayout.addChild(new ScrollView(this.answers, { follow: 'end', primary: true }), {
+        basis: 'auto',
+        grow: 1,
+        shrink: 1,
+        minSize: 1,
+      })
+      this.rootLayout.addChild(bottom, { basis: 'auto', shrink: 0, minSize: 1 })
+      ui.setLayoutRoot(this.rootLayout)
     } else {
       const ui = new TuiMainScreen(this.terminal, showHardwareCursor || undefined)
       this.ui = ui
@@ -261,6 +317,7 @@ export class AgentTui {
         break
       }
       case 'run_interrupted':
+        this.pendingAsk?.close('Rejected (interrupted)')
         this.commitThinking()
         this.streamText = null
         this.rows.clear()
@@ -305,6 +362,42 @@ export class AgentTui {
     this.finalizeAnswer(answer)
     this.ui.requestRender()
     this.stop()
+  }
+
+  /**
+   * Show the ask-user panel between the transcript and the input: a
+   * mouse-scrollable question area and a choice bar. Resolves with the
+   * chosen option; Esc rejects. The panel lives in the layout tree so the
+   * wheel routes to its ScrollView natively.
+   */
+  askUser(question: string, options: string[]): Promise<string> {
+    return new Promise<string>((resolve) => {
+      let settled = false
+      let panel: VStack | null = null
+
+      const finish = (choice: string) => {
+        if (settled) return
+        settled = true
+        this.pendingAsk = null
+        if (panel) this.rootLayout.removeChild(panel)
+        if (this.editor) this.ui.setFocus(this.editor)
+        this.ui.requestRender()
+        resolve(choice)
+      }
+
+      const bar = new OptionsBar(options, finish, () => this.ui.requestRender())
+      panel = new VStack([
+        { component: new Text(theme.bold('✻ question'), 1, 0), basis: 'auto', shrink: 0 },
+        // basis 'auto': full content in the unbounded render (exit document);
+        // maxSize caps it in the live viewport, where the wheel scrolls it.
+        { component: new ScrollView(new Markdown(question, 1, 1, markdownTheme), { follow: 'none' }), basis: 'auto', grow: 1, minSize: 1, maxSize: 12 },
+        { component: bar, basis: 'auto', shrink: 0 },
+      ])
+      this.rootLayout.addChild(panel, { basis: 'auto', shrink: 0, minSize: 1 })
+      this.ui.setFocus(bar)
+      this.pendingAsk = { close: finish }
+      this.ui.requestRender()
+    })
   }
 
   private wireInput(runPrompt: (prompt: string) => Promise<string>): Editor {
@@ -373,6 +466,11 @@ export class AgentTui {
     exit: () => void,
     onInterrupt?: () => void,
   ): { consume: boolean } | undefined {
+    // While the ask panel is open, Esc rejects it instead of interrupting.
+    if (this.pendingAsk && matchesKey(data, 'escape')) {
+      this.pendingAsk.close('Reject')
+      return { consume: true }
+    }
     if (this.busy && matchesKey(data, 'escape')) {
       onInterrupt?.()
       return { consume: true }

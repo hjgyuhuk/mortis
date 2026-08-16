@@ -24,6 +24,31 @@ const READ_MAX_CHARS = 64 * 1024
 const BASH_DEFAULT_TIMEOUT_S = 120
 const BASH_MAX_TIMEOUT_S = 600
 
+/** Reject with a standard AbortError when the signal fires first. */
+function raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  return new Promise<T>((resolve, reject) => {
+    const abortError = () => {
+      const error = new Error('The operation was aborted')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    if (signal.aborted) {
+      abortError()
+      return
+    }
+    signal.addEventListener('abort', abortError)
+    const settle = (callback: () => void) => {
+      signal.removeEventListener('abort', abortError)
+      callback()
+    }
+    promise.then(
+      (value) => settle(() => resolve(value)),
+      (error) => settle(() => reject(error)),
+    )
+  })
+}
+
 /** Denial text for the model. */
 function deny(decision: PolicyDecision): string {
   return `error: ${decision.reason ?? 'permission denied'}`
@@ -178,3 +203,42 @@ export function createBuiltinTools(policy: FilesystemPolicy, sandbox?: SandboxRu
 
 /** Permissive default (everything read-write); the CLI always builds a real policy. */
 export const builtinTools: Tool[] = createBuiltinTools(openPolicy())
+
+/** Default choices shown in the ask-user dialog. */
+export const DEFAULT_ASK_OPTIONS = ['Approve', 'Reject', 'Revise']
+
+/**
+ * Ask the user a question via a dialog (Approve / Reject / Revise).
+ * Blocks until the user answers; cancelling the run aborts with a standard
+ * AbortError so the run_interrupted transition applies.
+ */
+export function askUserTool(ask: (question: string, options: string[]) => Promise<string>): Tool {
+  return {
+    name: 'ask_user',
+    description:
+      'Ask the user a question in a dialog with selectable options (default Approve/Reject/Revise). ' +
+      'Use it before risky or ambiguous actions, or when instructions are unclear. ' +
+      'On Revise, end the run with a brief status: the user will send a corrected instruction next.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The question to show (markdown supported).' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional custom choice labels.',
+        },
+      },
+      required: ['question'],
+    },
+    async execute(args, context?) {
+      const question = String(args.question ?? '')
+      const options = Array.isArray(args.options) ? args.options.map(String) : [...DEFAULT_ASK_OPTIONS]
+      const choice = await raceWithSignal(ask(question, options), context?.signal)
+      if (choice === 'Revise') {
+        return 'User chose: Revise. End this run with a brief status; they will send a corrected instruction next.'
+      }
+      return `User chose: ${choice}.`
+    },
+  }
+}

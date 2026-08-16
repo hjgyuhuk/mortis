@@ -10,7 +10,7 @@ import { parseArgs } from 'node:util'
 import { readFileSync } from 'node:fs'
 import { Agent } from './agent/loop.js'
 import { OpenAIProvider } from './provider/openai.js'
-import { createBuiltinTools } from './tools/index.js'
+import { createBuiltinTools, askUserTool } from './tools/index.js'
 import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, writeFileConfig, type Config } from './config.js'
 import { AgentTui } from './tui/index.js'
 import { findGitRoot, loadAgentsMd } from './instructions.js'
@@ -18,6 +18,9 @@ import { hydrateState, latestSession, saveSession, serializeState } from './sess
 import type { AgentState } from './agent/state.js'
 import { FilesystemPolicy, mergeRules, parseRules, type FsRule } from './fs-policy.js'
 import { createSandbox } from './sandbox.js'
+import { ensureDefaultPersonas, loadPersonas, personaTool, runPersona, type PersonaDefinition } from './persona.js'
+import { Scope } from './agent/scope.js'
+import { RunInterruptedError } from './agent/loop.js'
 
 function parseCliArgs(argv: string[]) {
   const parsed = parseArgs({
@@ -107,6 +110,7 @@ async function main() {
     thinkingEffort: values['thinking-effort'],
   })
   ensureFileConfig(config)
+  ensureDefaultPersonas()
   const provider = new OpenAIProvider(config)
   const useTui = !values.plain
   const agentsMd = loadAgentsMd(process.cwd())
@@ -132,8 +136,8 @@ async function main() {
   const denyNote =
     'If an operation is denied by the filesystem policy or the sandbox ("permission denied" / "Operation not permitted"), ' +
     'do not retry it or attempt workarounds — stop immediately and report the failure and its reason to the user.'
-  const systemPrompt =
-    defaultSystemPrompt(tools, agentsMd) + '\n\n' + policy.describe() + '\n' + sandboxNote + '\n' + denyNote
+  const systemPromptFor = (toolList: Parameters<typeof defaultSystemPrompt>[0]): string =>
+    defaultSystemPrompt(toolList, agentsMd) + '\n\n' + policy.describe() + '\n' + sandboxNote + '\n' + denyNote
   if (sandboxEnabled && !sandbox) {
     console.error('mortis: no OS sandbox available on this platform; bash runs unsandboxed')
   }
@@ -153,18 +157,91 @@ async function main() {
       interactive: true,
       resumed: resumedState !== null,
     })
+    // Only the interactive TUI can answer questions, so ask_user exists here.
+    // Personas are user-editable markdown files under ~/.mortis/persona.
+    const personas = loadPersonas()
+    const personaProvider = (persona: PersonaDefinition): OpenAIProvider =>
+      new OpenAIProvider({
+        baseUrl: config.baseUrl,
+        model: persona.model ?? config.model,
+        apiKey: config.apiKey,
+        thinkingEffort: persona.thinkingEffort ?? config.thinkingEffort,
+      })
+    const interactiveTools = [
+      ...tools,
+      askUserTool((question, options) => tui.askUser(question, options)),
+      personaTool(personaProvider, personas),
+    ]
     const agent = new Agent({
       provider,
-      tools,
-      systemPrompt,
+      tools: interactiveTools,
+      systemPrompt: systemPromptFor(interactiveTools),
       state: resumedState ?? undefined,
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
     })
-    await tui.startInteractive(
-      (prompt) => agent.run(prompt),
-      { onInterrupt: () => agent.abort('user interrupt') },
-    )
+
+    // Slash dispatch: /planner runs the planner persona, then hands the
+    // evidence to the main agent, which decides what to do; everything else
+    // is a normal agent run. Cancellation is unified across both phases.
+    let cancelCurrent: (() => void) | null = null
+    const runPrompt = async (prompt: string): Promise<string> => {
+      if (prompt.startsWith('/planner')) {
+        const task = prompt.slice('/planner'.length).trim()
+        const planner = personas['planner']
+        if (!task) {
+          return 'Usage: `/planner <task>` — think the task through with the planner persona, then act on its evidence.'
+        }
+        if (!planner) {
+          return 'No planner persona found. Create `~/.mortis/persona/planner.md` (or delete the folder and restart to restore the default).'
+        }
+        const scope = new Scope()
+        cancelCurrent = () => scope.abort('user interrupt')
+        let evidence: string
+        try {
+          evidence = (
+            await runPersona(planner, task, {
+              provider: personaProvider(planner),
+              signal: scope.signal,
+              onEvent: (event) => tui.handle(event),
+            })
+          ).raw
+        } catch (error) {
+          // Cancellation of the persona phase maps to the agent-layer term.
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new RunInterruptedError('user interrupt')
+          }
+          throw error
+        } finally {
+          cancelCurrent = null
+        }
+        const decision = [
+          `The user ran /planner for this task: ${task}`,
+          '',
+          `Planner evidence (${planner.name}):`,
+          '',
+          evidence,
+          '',
+          'You are the main agent; the persona only plans. Proceed in this order:',
+          '1. ALWAYS use ask_user first to confirm with the user whether to execute the plan. Never skip this step.',
+          '2. If approved, implement it yourself — you write the code; the persona never does.',
+          '3. If rejected or revised, adjust: consult the persona again for a revised plan, or gather more information first with your tools.',
+        ].join('\n')
+        cancelCurrent = () => agent.abort('user interrupt')
+        try {
+          return await agent.run(decision)
+        } finally {
+          cancelCurrent = null
+        }
+      }
+      cancelCurrent = () => agent.abort('user interrupt')
+      try {
+        return await agent.run(prompt)
+      } finally {
+        cancelCurrent = null
+      }
+    }
+    await tui.startInteractive(runPrompt, { onInterrupt: () => cancelCurrent?.() })
     return
   }
 
@@ -180,7 +257,7 @@ async function main() {
     const agent = new Agent({
       provider,
       tools,
-      systemPrompt,
+      systemPrompt: systemPromptFor(tools),
       state: resumedState ?? undefined,
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
@@ -197,7 +274,7 @@ async function main() {
   const agent = new Agent({
     provider,
     tools,
-    systemPrompt,
+    systemPrompt: systemPromptFor(tools),
     state: resumedState ?? undefined,
     onTransition: checkpoint,
   })

@@ -112,6 +112,7 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 - **Esc 立刻中断运行中的回合**：取消在飞的模型请求和 shell 命令，回到输入框继续输入；Ctrl+C 同样中断，空闲时按 Ctrl+C 直接退出
 - transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
 - **思考过程呈现**：模型 reasoning（`reasoning_content` / `reasoning` 流）生成期间在输入框上方实时预览（最多两行、跟随尾部），结束后落为 transcript 中的 `✻ thinking` 灰色块；`--thinking-effort` 控制思考强度
+- **询问面板（ask_user）**：模型可调用 `ask_user` 工具向用户提问——transcript 与输入框之间弹出 `✻ question` 面板（markdown 渲染、鼠标滚轮滚动），下方 `[ Approve ] [ Reject ] [ Revise ]` 选项，键盘 ↑/↓/←/→ 选择、Enter 确认、Esc 快速拒绝；选 Revise 时模型收尾本轮，用户的下一条消息即修订内容；Ctrl+C 中断整个回合
 - 同一轮的多个工具调用**并发执行**、按声明顺序提交，工具行各自显示 ✓ / ✗
 - 带 prompt 参数的单次运行用主屏流式渲染：每轮工具调用一行，完成后 ✓ 与结果摘要，最终答案按 markdown 渲染
 
@@ -143,6 +144,36 @@ State → think → Decision → act (Effect) → Result → reduce → State
 - **观察者在边界**：TUI 与会话持久化只观察；checkpoint（`SessionSnapshot` 版本化、hydrate 时校验）在每次转移后写入，中途崩溃最多丢在飞的那一次转移
 - **显式失败**：工具错误返回文本给模型而非抛异常；超时与取消内建（bash：默认 120 秒、上限 600 秒）
 - **契约式测试**：provider 用本地 mock 服务器，循环用脚本化 mock provider，状态不变量用属性式测试回放随机事件序列
+
+## Persona（认知角色）
+
+**Persona 负责思考，Main Agent 负责决策，Effect 负责改变世界。** Persona 是被临时调用的认知视角：拥有 model / prompt / context / budget，但**没有工具**——不能读写文件、执行命令或联网。它的输出不是命令，而是供决策的结构化 Evidence：
+
+```
+Conclusion  推荐方案与理由
+Evidence    支撑观察（事实与假设分开）
+Proposal    可执行的有序计划
+Uncertainty 未知与风险及消解方式
+Effort      low | medium | high + 预期范围
+```
+
+交互模式输入 `/planner <task>`：Persona 先思考（流式呈现，含 reasoning），**Evidence 随后自动交给 Main Agent 判断**——接受并执行 Effect / 拒绝并说明 / 继续询问 Persona（`persona` 工具）/ 先用工具收集信息 / 没把握时 `ask_user`。Planner 只给概览（步骤/文件/签名/边界），不写完整实现代码；执行前 Main Agent **总是先 `ask_user` 确认**，代码也总是由 Main Agent 编写。Esc/Ctrl+C 在两个阶段都可中断。
+
+**Persona 是用户可编辑的 markdown 文件**，放在 `~/.mortis/persona/`（首次启动自动生成默认 `planner.md`，永不覆盖你的修改）。格式：frontmatter（`name` / `description`，可选 `model` / `thinking-effort` 覆盖）+ 正文即 system prompt：
+
+```markdown
+---
+name: reviewer
+description: Reviews code changes for bugs and style.
+model: deepseek-chat        # 可选：换模型
+thinking-effort: high       # 可选：换推理强度
+---
+
+You are Reviewer, a cognitive persona invoked by the Mortis main agent.
+You think; you do not act. ...
+```
+
+系统启动时读取目录下全部 `*.md` 注册为可用 persona（坏文件跳过、name 缺省取文件名），模型经 `persona` 工具可咨询任意已注册角色（Evidence 经 tool_result 进入会话状态）。
 
 ## 自定义供应商
 

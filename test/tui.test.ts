@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Markdown } from '@earendil-works/pi-tui'
-import { AgentTui } from '../src/tui/index.js'
+import { AgentTui, OptionsBar } from '../src/tui/index.js'
 
 /** Render the TUI component tree at a fixed width without starting the terminal. */
 function render(tui: AgentTui, width = 80): string[] {
@@ -273,5 +273,59 @@ describe('AgentTui global keys', () => {
     ;(input as unknown as { setText(text: string): void }).setText('/q')
     expect(handle(tui, '\r', exit)).toEqual({ consume: true })
     expect(exits).toBe(2)
+  })
+})
+
+describe('OptionsBar', () => {
+  it('renders every choice with the first selected', () => {
+    const bar = new OptionsBar(['Approve', 'Reject', 'Revise'], () => {}, () => {})
+    const [line] = bar.render(80)
+    expect(line).toContain('Approve')
+    expect(line).toContain('Reject')
+    expect(line).toContain('Revise')
+    expect(line).toContain('\u001b[7m')
+    expect(bar.selected).toBe('Approve')
+  })
+
+  it('moves the selection with up/down and confirms with Enter', () => {
+    const choices: string[] = []
+    const bar = new OptionsBar(['Approve', 'Reject', 'Revise'], (c) => choices.push(c), () => {})
+    bar.handleInput('\x1b[B') // down
+    expect(bar.selected).toBe('Reject')
+    bar.handleInput('\x1b[A') // up
+    expect(bar.selected).toBe('Approve')
+    bar.handleInput('\x1b[A') // wraps to the last
+    expect(bar.selected).toBe('Revise')
+    bar.handleInput('\r')
+    expect(choices).toEqual(['Revise'])
+  })
+})
+
+describe('AgentTui ask-user panel', () => {
+  it('shows the question and options, resolves on close, and Esc rejects', async () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    const pending = tui.askUser('Shall we **proceed**?', ['Approve', 'Reject', 'Revise'])
+
+    let lines = render(tui)
+    expect(lines.some((l) => l.includes('✻ question'))).toBe(true)
+    expect(lines.some((l) => l.includes('proceed'))).toBe(true)
+    expect(lines.some((l) => l.includes('Approve') && l.includes('Revise'))).toBe(true)
+
+    const handle = (data: string): { consume: boolean } | undefined =>
+      (tui as unknown as {
+        handleGlobalKey(d: string, exit: () => void, onInterrupt?: () => void): { consume: boolean } | undefined
+      }).handleGlobalKey(data, () => {}, () => {})
+    expect(handle('\x1b')).toEqual({ consume: true })
+
+    await expect(pending).resolves.toBe('Reject')
+    lines = render(tui)
+    expect(lines.some((l) => l.includes('✻ question'))).toBe(false)
+  })
+
+  it('resolves with the chosen option', async () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    const pending = tui.askUser('ok?', ['Approve', 'Reject', 'Revise'])
+    ;(tui as unknown as { pendingAsk: { close(choice: string): void } }).pendingAsk.close('Approve')
+    await expect(pending).resolves.toBe('Approve')
   })
 })

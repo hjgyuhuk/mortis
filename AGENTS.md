@@ -6,7 +6,7 @@
 
 - `src/types.ts` — 共享类型（Message / Tool / ToolContext / Decision / Effect / ChatProvider），映射 OpenAI wire 格式
 - `src/provider/openai.ts` — OpenAI API 兼容供应商（SSE 流解析 + tool-call 缝合）
-- `src/tools/index.ts` — 内置工具 read / write / edit / bash（工厂 `createBuiltinTools(policy)`）
+- `src/tools/index.ts` — 内置工具 read / write / edit / bash（工厂 `createBuiltinTools(policy)`）+ ask_user（交互模式询问面板）
 - `src/fs-policy.ts` — 文件系统五区权限（custom 最高 > secrets > workspace > scratch > outside）
 - `src/sandbox.ts` — bash 的 OS 级沙箱（darwin: sandbox-exec/Seatbelt；linux: bwrap；不可用则如实降级）
 - `src/agent/state.ts` — AgentState + `reduce()`（唯一状态变换点；不变量的家）
@@ -14,6 +14,7 @@
 - `src/agent/scope.ts` — 父链取消 Scope（Agent > Run > Effect 层次）
 - `src/agent/events.ts` — Domain 事件（UI 语义不进这里）
 - `src/session.ts` — 版本化 `SessionSnapshot` + latest checkpoint
+- `src/persona.ts` — Persona 认知角色（无工具、单次完成、结构化 Evidence；`~/.mortis/persona/*.md` 用户可编辑，默认生成 planner.md；`/planner` 用户入口 + 模型侧 persona 工具）
 - `src/tui/index.ts` — pi-tui 终端 UI；交互模式用 TuiAltScreen 聊天布局（ScrollView transcript + 多行 Editor 输入框），单次模式用 TuiMainScreen
 - `src/cli.ts` — CLI 入口；无 prompt 参数且非 --plain 时进交互 TUI
 - `test/` — vitest：agent 用脚本化 mock provider，provider 用本地 mock HTTP 服务器，state 含不变量测试

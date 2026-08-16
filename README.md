@@ -112,6 +112,7 @@ Built on pi-tui. **Enabled by default**; `--plain` is the only off switch:
 - **Esc interrupts the in-flight run immediately**: pending model requests and shell commands are cancelled and you are back in the input box; Ctrl+C interrupts too, and exits when idle
 - Transcript scrolling: mouse wheel / PageUp / PageDown / Home / End, auto-following new output; `Ctrl+Shift+F` full-text search; on exit the complete transcript is printed into the terminal's scrollback
 - **Thinking display**: model reasoning (`reasoning_content` / `reasoning` streams) shows as a live two-line preview above the input box while streaming, then settles into a gray `✻ thinking` block in the transcript; `--thinking-effort` controls reasoning effort
+- **Ask-user panel (ask_user)**: the model can call the `ask_user` tool to ask you — a `✻ question` panel appears between the transcript and the input (markdown rendered, mouse-wheel scrollable) with `[ Approve ] [ Reject ] [ Revise ]` below; select with ↑/↓/←/→, confirm with Enter, Esc quick-rejects; on Revise the model wraps up and your next message is the correction; Ctrl+C interrupts the whole run
 - Tool calls within one turn **run concurrently**, commit in declaration order, and each row shows ✓ / ✗
 - A single prompt argument uses the main-screen streaming view: one row per tool call, ✓ and a result summary when done, final answer rendered as markdown
 
@@ -143,6 +144,36 @@ Consequences:
 - **Observers at the boundary**: the TUI and session persistence only observe; checkpoints (`SessionSnapshot` versioned, validated on hydrate) are written after every transition, so a crash loses at most the transition in flight
 - **Explicit failure**: tools return error text to the model instead of throwing; timeouts and cancellation are built in (bash: default 120s, max 600s)
 - **Tested as contracts**: mock HTTP servers for the provider, scripted providers for the loop, and property-based tests that replay random event sequences against the state invariants
+
+## Personas (cognitive roles)
+
+**Personas think, the main agent decides, effects change the world.** A persona is a cognitive viewpoint invoked temporarily: it has a model / prompt / context / budget but **no tools** — it cannot read files, run commands, or touch the network. Its output is structured evidence for a decision, not commands:
+
+```
+Conclusion  the recommended approach and why
+Evidence    supporting observations (facts vs assumptions)
+Proposal    an ordered, executable plan
+Uncertainty what is unknown or risky, and how to resolve it
+Effort      low | medium | high + expected scope
+```
+
+In interactive mode, type `/planner <task>`: the persona thinks first (streamed, reasoning included), then the **evidence is handed to the main agent, which decides** — the planner only provides an overview (steps, files, signatures, edge cases — never full implementation code), the main agent **always confirms with ask_user before executing**, and the main agent always writes the code itself. It may also reject, consult the persona again (the `persona` tool), or gather more information first. Esc/Ctrl+C interrupt either phase.
+
+**Personas are user-editable markdown files** in `~/.mortis/persona/` (a default `planner.md` is created on first run and never overwritten). Format: frontmatter (`name` / `description`, optional `model` / `thinking-effort` overrides) + the system prompt as the body:
+
+```markdown
+---
+name: reviewer
+description: Reviews code changes for bugs and style.
+model: deepseek-chat        # optional: different model
+thinking-effort: high       # optional: different reasoning effort
+---
+
+You are Reviewer, a cognitive persona invoked by the Mortis main agent.
+You think; you do not act. ...
+```
+
+At startup every valid `*.md` in the directory is registered (broken files are skipped; a missing name falls back to the filename), and the model can consult any registered role through the `persona` tool (evidence enters conversation state as a tool result).
 
 ## Custom Providers
 

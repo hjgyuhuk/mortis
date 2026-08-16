@@ -7,7 +7,7 @@ export type { AgentEvent, AgentEventListener } from './agent/events.js'
 export { initialState, reduce, isSendable, type AgentState, type AgentStatus, type StateEvent } from './agent/state.js'
 export { Scope } from './agent/scope.js'
 export { OpenAIProvider, type OpenAIProviderOptions } from './provider/openai.js'
-export { createBuiltinTools, builtinTools } from './tools/index.js'
+export { createBuiltinTools, builtinTools, askUserTool, DEFAULT_ASK_OPTIONS } from './tools/index.js'
 export {
   FilesystemPolicy,
   mergeRules,
@@ -35,8 +35,23 @@ export {
   type Config,
   type FilesystemConfig,
 } from './config.js'
-export { AgentTui, type AgentTuiOptions } from './tui/index.js'
+export { AgentTui, OptionsBar } from './tui/index.js'
+export type { AgentTuiOptions } from './tui/index.js'
 export { loadAgentsMd, findGitRoot } from './instructions.js'
+export {
+  PERSONAS,
+  PLANNER,
+  ensureDefaultPersonas,
+  loadPersonas,
+  parsePersonaMarkdown,
+  parsePersonaOutput,
+  personaTool,
+  personasDir,
+  runPersona,
+  serializePersonaMarkdown,
+  type PersonaDefinition,
+  type PersonaResult,
+} from './persona.js'
 export {
   hydrateState,
   latestSession,

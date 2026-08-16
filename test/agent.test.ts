@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Agent } from '../src/agent/loop.js'
 import { initialState, isSendable, reduce } from '../src/agent/state.js'
+import { askUserTool } from '../src/tools/index.js'
 import type { ChatProvider, Message, ModelResponse, StreamChunk, Tool, ToolCall } from '../src/types.js'
 
 /** Deterministic provider driven by a script of responses. */
@@ -206,6 +207,39 @@ describe('Agent loop', () => {
     // Reasoning is display-only: it never enters the state.
     expect(JSON.stringify(agent.snapshot.messages)).not.toContain('think')
     expect(agent.snapshot.messages.at(-1)).toEqual({ role: 'assistant', content: 'answer' })
+  })
+
+  it('routes ask_user through the ask callback and feeds the choice back', async () => {
+    const provider = new ScriptedProvider([
+      { kind: 'tool_calls', tool_calls: [makeCall('c1', 'ask_user', '{"question":"proceed?","options":["Approve","Reject","Revise"]}')] },
+      { kind: 'text', content: 'done' },
+    ])
+    const agent = new Agent({
+      provider,
+      tools: [askUserTool(async () => 'Approve')],
+      systemPrompt: 'sys',
+    })
+
+    const result = await agent.run('go')
+    expect(result).toBe('done')
+    const toolMsg = provider.calls[1]![3]
+    expect(toolMsg).toMatchObject({ role: 'tool', tool_call_id: 'c1' })
+    expect(toolMsg!.content).toContain('Approve')
+  })
+
+  it('ask_user returns wrap-up guidance on Revise', async () => {
+    const tool = askUserTool(async () => 'Revise')
+    const result = await tool.execute({ question: 'q' })
+    expect(result).toContain('Revise')
+    expect(result).toContain('corrected instruction')
+  })
+
+  it('ask_user aborts with a standard AbortError when the run is cancelled', async () => {
+    const tool = askUserTool(() => new Promise<string>(() => {})) // user never answers
+    const controller = new AbortController()
+    const pending = tool.execute({ question: 'q' }, { signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('aborts an in-flight model request and stays resumable', async () => {
