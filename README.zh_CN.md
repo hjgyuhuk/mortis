@@ -8,11 +8,12 @@
 
 ## 特性
 
-- **流式 OpenAI 兼容供应商**——SSE 解析、增量 tool-call 缝合、非 SSE 回退、思考流（`reasoning_content` / `reasoning`）、`AbortSignal` 可取消
-- **聊天式 TUI**——备用屏幕布局：滚动 transcript、多行输入框、实时思考预览、逐工具状态行；退出时完整对话打印回终端 scrollback
-- **可中断**——Ctrl+C 取消在飞的模型请求与子进程，收尾状态后保留会话继续使用
-- **并行工具、确定性状态**——同轮工具调用并发执行、按声明顺序提交；历史只追加不修改，供应商前缀缓存持续命中
-- **会话恢复**——每次状态转移写 checkpoint，`--continue` 接续上次对话
+- **副作用是一等公民**：小状态机内核（`State → think → Decision → act → reduce`），reducer 是唯一的状态变换点；工具并发执行、按声明顺序提交；历史只追加不修改——deterministic、可重放、前缀缓存友好
+- **完整的 Effect 生命周期管理**：父链取消 Scope（Agent > Run > Effect）；Esc/Ctrl+C 随时中断运行中的回合，在飞的模型请求与子进程一并取消、会话保持可用；中断是正式的状态转移而非异常处理
+- **受约束的副作用**：五区文件系统权限（custom R/RW/DENY > secrets > workspace > scratch > outside）对 read/write/edit 严格执法；bash 运行在由同一策略生成的 OS 沙箱内（macOS Seatbelt / Linux bubblewrap）
+- **Persona——无副作用的认知**：`~/.mortis/persona/*.md` 用户可编辑的认知角色，只思考不行动，输出结构化 Evidence（Conclusion / Evidence / Proposal / Uncertainty / Effort）；`/planner` 把 Evidence 交给 Main Agent，执行前必先询问用户，代码也总是由 Main Agent 编写
+- **人类在环**：`ask_user` 询问面板（Approve / Reject / Revise，键盘选择）为有风险的决策把关
+- 流式 OpenAI 兼容供应商（含思考呈现）、聊天式 TUI、每次状态转移的会话 checkpoint 构成完整闭环
 
 ## 结构
 

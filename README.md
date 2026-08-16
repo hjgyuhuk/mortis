@@ -8,11 +8,12 @@ No multi-session management, no complex scoping: just one runnable, testable, mi
 
 ## Highlights
 
-- **Streaming OpenAI-compatible provider** — SSE parsing, incremental tool-call stitching, non-SSE fallback, reasoning streams (`reasoning_content` / `reasoning`), cancellable via `AbortSignal`
-- **Chat-style TUI** — alt-screen layout with a scrolling transcript, multi-line editor, live thinking preview, and per-tool rows; the full transcript is printed into scrollback on exit
-- **Interruptible** — Ctrl+C cancels the in-flight model request and child processes, finalizes the state, and keeps the session usable
-- **Parallel tools, deterministic state** — tool calls in one turn run concurrently but commit in declaration order; history is append-only so provider prefix caching keeps hitting
-- **Session resume** — checkpoints on every state transition; `--continue` picks the conversation back up
+- **Side effects are the first-class concern**: a small state machine (`State → think → Decision → act → reduce`) where the reducer is the only mutation authority; tool calls run concurrently but commit in declaration order; history is append-only — deterministic, replayable, and prefix-cache friendly
+- **Full effect-lifecycle management**: parent-linked cancellation scopes (Agent > Run > Effect); Esc/Ctrl+C interrupt any run mid-flight, cancelling in-flight model requests and child processes while the session stays usable; interruption is a real state transition, not error handling
+- **Contained effects**: a five-zone filesystem policy (custom R/RW/DENY > secrets > workspace > scratch > outside) strictly enforced on read/write/edit, and bash runs inside an OS-generated sandbox (macOS Seatbelt / Linux bubblewrap) derived from the same policy
+- **Personas — cognition without side effects**: user-editable markdown cognitive roles in `~/.mortis/persona/*.md` that think and never act, returning structured evidence (Conclusion / Evidence / Proposal / Uncertainty / Effort); `/planner` hands the evidence to the main agent, which always asks the user before executing and writes the code itself
+- **Human in the loop**: `ask_user` dialogs (Approve / Reject / Revise, keyboard-selected) gate risky decisions
+- Streaming OpenAI-compatible provider with reasoning display, a chat-style TUI, and per-transition session checkpoints round out the loop
 
 ## Structure
 
