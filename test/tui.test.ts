@@ -195,3 +195,83 @@ describe('AgentTui interactive', () => {
     expect(ran).toBe(true)
   })
 })
+
+describe('AgentTui global keys', () => {
+  function handle(
+    tui: AgentTui,
+    data: string,
+    exit: () => void,
+    onInterrupt?: () => void,
+  ): { consume: boolean } | undefined {
+    return (tui as unknown as {
+      handleGlobalKey(data: string, exit: () => void, onInterrupt?: () => void): { consume: boolean } | undefined
+    }).handleGlobalKey(data, exit, onInterrupt)
+  }
+
+  it('interrupts the running turn on Esc, falls through when idle', async () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    let exited = false
+    let interrupted = 0
+    const exit = () => { exited = true }
+    const onInterrupt = () => { interrupted++ }
+
+    expect(handle(tui, '\x1b', exit, onInterrupt)).toBeUndefined()
+    expect(interrupted).toBe(0)
+
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const input = wire(tui, async () => {
+      await gate
+      return 'done'
+    })
+    input.onSubmit('work')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(handle(tui, '\x1b', exit, onInterrupt)).toEqual({ consume: true })
+    expect(interrupted).toBe(1)
+    expect(exited).toBe(false)
+
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  it('exits via Ctrl+C when idle and interrupts when busy', async () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    let exited = false
+    let interrupted = 0
+    const exit = () => { exited = true }
+    const onInterrupt = () => { interrupted++ }
+
+    expect(handle(tui, '\x03', exit, onInterrupt)).toEqual({ consume: true })
+    expect(exited).toBe(true)
+
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const input = wire(tui, async () => {
+      await gate
+      return 'done'
+    })
+    input.onSubmit('work')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(handle(tui, '\x03', exit, onInterrupt)).toEqual({ consume: true })
+    expect(interrupted).toBe(1)
+
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  it('exits on Ctrl+D and on /q + Enter', async () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    let exits = 0
+    const exit = () => { exits++ }
+
+    expect(handle(tui, '\x04', exit)).toEqual({ consume: true })
+    expect(exits).toBe(1)
+
+    const input = wire(tui)
+    ;(input as unknown as { setText(text: string): void }).setText('/q')
+    expect(handle(tui, '\r', exit)).toEqual({ consume: true })
+    expect(exits).toBe(2)
+  })
+})

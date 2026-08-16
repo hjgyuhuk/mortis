@@ -1,8 +1,20 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { bashTool, editTool, readTool, writeTool } from '../src/tools/index.js'
+import {
+  bashTool as makeBash,
+  editTool as makeEdit,
+  readTool as makeRead,
+  writeTool as makeWrite,
+  createBuiltinTools,
+} from '../src/tools/index.js'
+import { FilesystemPolicy, openPolicy, type FsRule } from '../src/fs-policy.js'
+
+const readTool = makeRead(openPolicy())
+const writeTool = makeWrite(openPolicy())
+const editTool = makeEdit(openPolicy())
+const bashTool = makeBash(openPolicy())
 
 let tmp: string
 
@@ -106,3 +118,86 @@ describe('bash tool', () => {
     expect(Date.now() - start).toBeLessThan(5000)
   }, 10_000)
 })
+
+describe('filesystem policy enforcement', () => {
+  function restrictedPolicy(rules: FsRule[] = []) {
+    const workspace = join(tmp, 'ws')
+    const scratch = join(tmp, 'scratch')
+    const outside = join(tmp, 'outside')
+    mkdirSync(workspace, { recursive: true })
+    mkdirSync(scratch, { recursive: true })
+    mkdirSync(outside, { recursive: true })
+    return {
+      policy: new FilesystemPolicy({ workspaceRoot: workspace, scratchRoot: scratch, rules }),
+      workspace,
+      scratch,
+      outside,
+    }
+  }
+
+  it('write succeeds inside workspace and scratch, denied outside', async () => {
+    const { policy, workspace, scratch, outside } = restrictedPolicy()
+    const write = makeWrite(policy)
+    expect((await write.execute({ path: join(workspace, 'a.txt'), content: 'x' })).startsWith('wrote')).toBe(true)
+    expect((await write.execute({ path: join(scratch, 'b.txt'), content: 'x' })).startsWith('wrote')).toBe(true)
+    const denied = await write.execute({ path: join(outside, 'c.txt'), content: 'x' })
+    expect(denied).toContain('permission denied')
+    expect(denied).toContain('read-only')
+  })
+
+  it('read works outside the workspace but is denied in secrets', async () => {
+    const { policy, outside } = restrictedPolicy()
+    const read = makeRead(policy)
+    const outsideFile = join(outside, 'note.txt')
+    writeFileSync(outsideFile, 'public data')
+    expect(await read.execute({ path: outsideFile })).toBe('public data')
+
+    const secretsDir = join(tmp, 'secrets')
+    mkdirSync(secretsDir)
+    const locked = new FilesystemPolicy({
+      workspaceRoot: join(tmp, 'ws'),
+      rules: [{ path: secretsDir, access: 'deny' }],
+    })
+    const denied = await makeRead(locked).execute({ path: join(secretsDir, 'key.pem') })
+    expect(denied).toContain('permission denied')
+  })
+
+  it('custom rw rules grant writes outside the workspace', async () => {
+    const granted = join(tmp, 'granted')
+    mkdirSync(granted)
+    const { policy, outside } = restrictedPolicy([{ path: granted, access: 'rw' }])
+    const write = makeWrite(policy)
+    expect((await write.execute({ path: join(granted, 'ok.txt'), content: 'x' })).startsWith('wrote')).toBe(true)
+    expect(await write.execute({ path: join(outside, 'no.txt'), content: 'x' })).toContain('permission denied')
+  })
+
+  it('edit is denied outside writable zones', async () => {
+    const { policy, outside } = restrictedPolicy()
+    const outsideFile = join(outside, 'ro.txt')
+    writeFileSync(outsideFile, 'content')
+    const result = await makeEdit(policy).execute({ path: outsideFile, old_string: 'content', new_string: 'x' })
+    expect(result).toContain('permission denied')
+    expect(await readFileAgain(outsideFile)).toBe('content')
+  })
+
+  it('bash rejects a working directory inside a denied zone', async () => {
+    const secretsDir = join(tmp, 'secrets')
+    mkdirSync(secretsDir)
+    const { policy } = restrictedPolicy([{ path: secretsDir, access: 'deny' }])
+    const bash = makeBash(policy)
+    const denied = await bash.execute({ command: 'ls', cwd: secretsDir })
+    expect(denied).toContain('permission denied')
+    expect((await bash.execute({ command: 'echo ok' })).trim()).toBe('ok')
+  })
+
+  it('createBuiltinTools binds all four tools to the policy', () => {
+    const { policy } = restrictedPolicy()
+    const tools = createBuiltinTools(policy)
+    expect(tools.map((tool) => tool.name)).toEqual(['read', 'write', 'edit', 'bash'])
+  })
+})
+
+async function readFileAgain(path: string): Promise<string> {
+  const { readFile } = await import('node:fs/promises')
+  return readFile(path, 'utf8')
+}

@@ -32,6 +32,18 @@ describe('config', () => {
     expect(resolveConfig({ thinkingEffort: 'medium' }).thinkingEffort).toBe('medium')
   })
 
+  it('reads the filesystem section from the config file', () => {
+    writeFileConfig({
+      baseUrl: 'http://x/v1',
+      model: 'm',
+      filesystem: { scratchDir: '/scratch', rules: [{ path: '/data', access: 'rw' }] },
+    })
+    expect(resolveConfig().filesystem).toEqual({
+      scratchDir: '/scratch',
+      rules: [{ path: '/data', access: 'rw' }],
+    })
+  })
+
   it('reads defaults when no config file exists', () => {
     const config = resolveConfig()
     expect(config.baseUrl).toBe('https://api.openai.com/v1')

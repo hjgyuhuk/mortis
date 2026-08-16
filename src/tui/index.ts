@@ -358,23 +358,43 @@ export class AgentTui {
       const input = this.wireInput(runPrompt)
 
       this.ui.addInputListener((data) => {
-        // Ctrl+C interrupts the in-flight run; when idle it exits.
-        if (matchesKey(data, 'ctrl+c')) {
-          if (this.busy) options.onInterrupt?.()
-          else exit()
-          return { consume: true }
-        }
-        if (matchesKey(data, 'ctrl+d')) { exit(); return { consume: true } }
-        // /q is matched against the editor's real text, so paste and cursor
-        // movement cannot desynchronize the check. The listener runs before
-        // the focused editor, so consuming Enter keeps /q away from onSubmit.
-        if ((data === '\r' || data === '\n') && input.getText().trim() === '/q') {
-          exit()
-          return { consume: true }
-        }
-        return undefined
+        return this.handleGlobalKey(data, exit, options.onInterrupt)
       })
     })
+  }
+
+  /**
+   * Decide what a global key press does. Esc interrupts the in-flight run and
+   * returns control to the input box; when idle it falls through to the
+   * editor (e.g. closing autocomplete).
+   */
+  private handleGlobalKey(
+    data: string,
+    exit: () => void,
+    onInterrupt?: () => void,
+  ): { consume: boolean } | undefined {
+    if (this.busy && matchesKey(data, 'escape')) {
+      onInterrupt?.()
+      return { consume: true }
+    }
+    // Ctrl+C interrupts the in-flight run; when idle it exits.
+    if (matchesKey(data, 'ctrl+c')) {
+      if (this.busy) onInterrupt?.()
+      else exit()
+      return { consume: true }
+    }
+    if (matchesKey(data, 'ctrl+d')) {
+      exit()
+      return { consume: true }
+    }
+    // /q is matched against the editor's real text, so paste and cursor
+    // movement cannot desynchronize the check. The listener runs before
+    // the focused editor, so consuming Enter keeps /q away from onSubmit.
+    if ((data === '\r' || data === '\n') && this.editor?.getText().trim() === '/q') {
+      exit()
+      return { consume: true }
+    }
+    return undefined
   }
 
   stop(): void {

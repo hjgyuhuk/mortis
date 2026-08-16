@@ -84,7 +84,15 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
   "baseUrl": "http://localhost:11434/v1",
   "model": "qwen2.5-coder",
   "apiKey": "sk-...",
-  "thinkingEffort": "high"
+  "thinkingEffort": "high",
+  "filesystem": {
+    "scratchDir": "/tmp",
+    "rules": [
+      { "path": "/data/projects", "access": "rw" },
+      { "path": "/etc/ssl/private", "access": "deny" },
+      { "path": "/var/log", "access": "r" }
+    ]
+  }
 }
 ```
 
@@ -101,7 +109,7 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 基于 pi-tui。**默认启用**，`--plain` 是唯一关闭开关：
 
 - 无 prompt 参数时**直接进入交互模式**（备用屏幕聊天布局）：**多行输入框**——Enter 提交、Shift+Enter 换行（不支持 Shift+Enter 的终端用行尾 `\`+Enter）、↑/↓ 翻提交历史；`/q` 或 Ctrl+D 退出，**多轮答案累积**在滚动 transcript 里
-- **Ctrl+C 中断运行中的回合**：取消在飞的模型请求和 shell 命令，会话保留、可继续提问；空闲时按 Ctrl+C 直接退出
+- **Esc 立刻中断运行中的回合**：取消在飞的模型请求和 shell 命令，回到输入框继续输入；Ctrl+C 同样中断，空闲时按 Ctrl+C 直接退出
 - transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
 - **思考过程呈现**：模型 reasoning（`reasoning_content` / `reasoning` 流）生成期间在输入框上方实时预览（最多两行、跟随尾部），结束后落为 transcript 中的 `✻ thinking` 灰色块；`--thinking-effort` 控制思考强度
 - 同一轮的多个工具调用**并发执行**、按声明顺序提交，工具行各自显示 ✓ / ✗
@@ -151,6 +159,26 @@ class MyProvider implements ChatProvider {
 }
 ```
 
+## 文件系统权限
+
+`read` / `write` / `edit` 由五区策略严格约束（`src/fs-policy.ts`）：
+
+| 优先级 | 区 | 默认 | 权限 |
+|---|---|---|---|
+| 1 | custom | config.json `filesystem.rules` / CLI `--fs-rw` `--fs-r` `--fs-deny` | 每条规则自定 R / RW / DENY，最长前缀匹配，可覆盖一切内置区 |
+| 2 | secrets | `~/.ssh`、`~/.mortis` | 拒绝一切访问 |
+| 3 | workspace | cwd 的 git 根 | 读写 |
+| 4 | scratch | `/tmp`（`--scratch` / `filesystem.scratchDir` 可配置） | 读写 |
+| 5 | outside | 其余路径 | 只读 |
+
+路径经 `realpath` 归一化，符号链接逃逸会被识别。拒绝以文本返回给模型，模型可据此调整。
+
 ## 安全边界
 
-Mortis **没有沙箱**。系统提示要求它在当前仓库内工作，但 `write` / `edit` / `bash` 接受任意绝对路径、可执行任意 shell 命令，实际不做任何路径或权限限制。只在你信任模型与端点的环境下运行。
+文件工具（read/write/edit）由五区策略严格约束；**bash 由操作系统级沙箱管住**：
+
+- **macOS**：`sandbox-exec`（Seatbelt）——全局拒写 + RW 区子路径放行 + 拒绝区拒读，规则由策略自动生成。路径经 realpath 归一化（`/tmp` → `/private/tmp` 别名已处理），符号链接逃逸无效；超时会连带沙箱内子进程一起终止
+- **Linux**：bubblewrap（`bwrap`，需已安装）——只读根挂载 + RW 区读写绑定 + 拒绝区 tmpfs 遮蔽
+- **不可用或 `--no-sandbox`**：如实降级——启动警告、系统提示与工具描述都明示"unsandboxed"，不假装管住了
+
+macOS Seatbelt 已知存在历史逃逸手法，沙箱是强约束而非绝对边界；对完全不受信任的模型仍需谨慎。

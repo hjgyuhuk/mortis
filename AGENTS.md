@@ -6,7 +6,9 @@
 
 - `src/types.ts` — 共享类型（Message / Tool / ToolContext / Decision / Effect / ChatProvider），映射 OpenAI wire 格式
 - `src/provider/openai.ts` — OpenAI API 兼容供应商（SSE 流解析 + tool-call 缝合）
-- `src/tools/index.ts` — 内置工具 read / write / edit / bash
+- `src/tools/index.ts` — 内置工具 read / write / edit / bash（工厂 `createBuiltinTools(policy)`）
+- `src/fs-policy.ts` — 文件系统五区权限（custom 最高 > secrets > workspace > scratch > outside）
+- `src/sandbox.ts` — bash 的 OS 级沙箱（darwin: sandbox-exec/Seatbelt；linux: bwrap；不可用则如实降级）
 - `src/agent/state.ts` — AgentState + `reduce()`（唯一状态变换点；不变量的家）
 - `src/agent/loop.ts` — Agent 循环（think → act）+ `RunInterruptedError`
 - `src/agent/scope.ts` — 父链取消 Scope（Agent > Run > Effect 层次）
@@ -42,7 +44,7 @@
 
 ## 命令
 
-- `pnpm dev` — 交互式 TUI（Ctrl+C 中断运行中的回合并保留会话，空闲时退出；/q 或 Ctrl+D 退出）；`pnpm dev <prompt>` — 单次运行；`--plain` 关闭 TUI
+- `pnpm dev` — 交互式 TUI（Esc 或 Ctrl+C 中断运行中的回合并保留会话，空闲时 Ctrl+C 退出；/q 或 Ctrl+D 退出）；`pnpm dev <prompt>` — 单次运行；`--plain` 关闭 TUI
 - `pnpm dev --continue` — 恢复最近一次会话（~/.mortis/sessions/latest.json）
 - `pnpm build` — tsc 编译到 dist/
 - `pnpm typecheck` — 类型检查（src + test）

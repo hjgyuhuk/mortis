@@ -10,12 +10,14 @@ import { parseArgs } from 'node:util'
 import { readFileSync } from 'node:fs'
 import { Agent } from './agent/loop.js'
 import { OpenAIProvider } from './provider/openai.js'
-import { builtinTools } from './tools/index.js'
+import { createBuiltinTools } from './tools/index.js'
 import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, writeFileConfig, type Config } from './config.js'
 import { AgentTui } from './tui/index.js'
-import { loadAgentsMd } from './instructions.js'
+import { findGitRoot, loadAgentsMd } from './instructions.js'
 import { hydrateState, latestSession, saveSession, serializeState } from './session.js'
 import type { AgentState } from './agent/state.js'
+import { FilesystemPolicy, mergeRules, parseRules, type FsRule } from './fs-policy.js'
+import { createSandbox } from './sandbox.js'
 
 function parseCliArgs(argv: string[]) {
   const parsed = parseArgs({
@@ -30,6 +32,11 @@ function parseCliArgs(argv: string[]) {
       init: { type: 'boolean' } as const,
       plain: { type: 'boolean' } as const,
       continue: { type: 'boolean' } as const,
+      scratch: { type: 'string' } as const,
+      'fs-rw': { type: 'string', multiple: true } as const,
+      'fs-r': { type: 'string', multiple: true } as const,
+      'fs-deny': { type: 'string', multiple: true } as const,
+      'no-sandbox': { type: 'boolean' } as const,
     },
     allowPositionals: true,
   })
@@ -53,10 +60,15 @@ function usage(): string {
     '  --base-url <url>   OpenAI-compatible base URL (env: MORTIS_BASE_URL)',
     '  --model <name>     Model name (env: MORTIS_MODEL)',
     '  --api-key <key>    API key (env: MORTIS_API_KEY)',
-    "  --thinking-effort <level>  Reasoning effort, sent as thinking_effort (env: MORTIS_THINKING_EFFORT)",
+    '  --thinking-effort <level>  Reasoning effort, sent as thinking_effort (env: MORTIS_THINKING_EFFORT)',
     '  --cwd <path>       Working directory for the agent',
     '  --plain            Disable the terminal UI (no animations)',
     '  --continue         Resume the latest saved session (~/.mortis/sessions/latest.json)',
+    '  --scratch <dir>    Scratch directory (rw zone; default /tmp)',
+    '  --fs-rw <dir>      Grant read/write on a directory (repeatable)',
+    '  --fs-r <dir>       Grant read-only on a directory (repeatable)',
+    '  --fs-deny <dir>    Deny all access on a directory (repeatable)',
+    '  --no-sandbox       Disable the OS sandbox for bash (dangerous)',
     '  --init             Write a config file to ~/.mortis/config.json',
     '  -h, --help         Show this help',
   ].join('\n')
@@ -99,6 +111,33 @@ async function main() {
   const useTui = !values.plain
   const agentsMd = loadAgentsMd(process.cwd())
 
+  // Filesystem policy: workspace = git root, scratch = /tmp (configurable),
+  // custom rules from config + CLI override everything.
+  const cliRules: FsRule[] = [
+    ...(values['fs-rw'] ?? []).map((path) => ({ path, access: 'rw' as const })),
+    ...(values['fs-r'] ?? []).map((path) => ({ path, access: 'r' as const })),
+    ...(values['fs-deny'] ?? []).map((path) => ({ path, access: 'deny' as const })),
+  ]
+  const policy = new FilesystemPolicy({
+    workspaceRoot: findGitRoot(process.cwd()) ?? process.cwd(),
+    scratchRoot: values.scratch ?? config.filesystem?.scratchDir,
+    rules: mergeRules(parseRules(config.filesystem?.rules), cliRules),
+  })
+  const sandboxEnabled = values['no-sandbox'] ? false : (config.filesystem?.sandbox ?? true)
+  const sandbox = createSandbox(policy, sandboxEnabled)
+  const tools = createBuiltinTools(policy, sandbox)
+  const sandboxNote = sandbox
+    ? 'Shell commands run inside an OS sandbox: writes are confined to the writable directories above and denied directories are unreadable.'
+    : 'WARNING: shell commands are NOT sandboxed — the filesystem policy does not constrain them.'
+  const denyNote =
+    'If an operation is denied by the filesystem policy or the sandbox ("permission denied" / "Operation not permitted"), ' +
+    'do not retry it or attempt workarounds — stop immediately and report the failure and its reason to the user.'
+  const systemPrompt =
+    defaultSystemPrompt(tools, agentsMd) + '\n\n' + policy.describe() + '\n' + sandboxNote + '\n' + denyNote
+  if (sandboxEnabled && !sandbox) {
+    console.error('mortis: no OS sandbox available on this platform; bash runs unsandboxed')
+  }
+
   // Session resume + checkpointing: persistence observes state transitions
   // from outside the agent core, so a crash loses at most one transition.
   const resumedState: AgentState | null = values.continue ? hydrateState(latestSession()) : null
@@ -116,8 +155,8 @@ async function main() {
     })
     const agent = new Agent({
       provider,
-      tools: builtinTools,
-      systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
+      tools,
+      systemPrompt,
       state: resumedState ?? undefined,
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
@@ -140,8 +179,8 @@ async function main() {
     tui.start()
     const agent = new Agent({
       provider,
-      tools: builtinTools,
-      systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
+      tools,
+      systemPrompt,
       state: resumedState ?? undefined,
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
@@ -157,8 +196,8 @@ async function main() {
 
   const agent = new Agent({
     provider,
-    tools: builtinTools,
-    systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
+    tools,
+    systemPrompt,
     state: resumedState ?? undefined,
     onTransition: checkpoint,
   })

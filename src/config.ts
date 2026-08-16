@@ -7,6 +7,17 @@ import { homedir } from 'node:os'
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Tool } from './types.js'
+import type { FsRule } from './fs-policy.js'
+
+/** Filesystem permission configuration (see fs-policy.ts). */
+export interface FilesystemConfig {
+  /** Scratch directory (rw zone); default /tmp. */
+  scratchDir?: string
+  /** Custom rules, highest precedence: absolute dir + r | rw | deny. */
+  rules?: FsRule[]
+  /** Wrap bash in an OS sandbox when available (default true). */
+  sandbox?: boolean
+}
 
 export interface Config {
   /** Base URL of the OpenAI-compatible endpoint. */
@@ -17,6 +28,8 @@ export interface Config {
   apiKey?: string
   /** Optional reasoning effort, sent as `thinking_effort` (e.g. 'low' | 'medium' | 'high'). */
   thinkingEffort?: string
+  /** Optional filesystem permission configuration. */
+  filesystem?: FilesystemConfig
 }
 
 /** Path to the configuration directory. */
@@ -38,7 +51,13 @@ export function readFileConfig(): Partial<Config> {
   if (!existsSync(path)) return {}
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>
-    return { baseUrl: parsed.baseUrl, model: parsed.model, apiKey: parsed.apiKey, thinkingEffort: parsed.thinkingEffort }
+    return {
+      baseUrl: parsed.baseUrl,
+      model: parsed.model,
+      apiKey: parsed.apiKey,
+      thinkingEffort: parsed.thinkingEffort,
+      filesystem: parsed.filesystem,
+    }
   } catch (error) {
     throw new Error(`invalid config at ${path}: ${(error as Error).message}`)
   }
@@ -76,7 +95,8 @@ export function resolveConfig(overrides: Partial<Config> = {}): Config {
   const model = overrides.model ?? process.env.MORTIS_MODEL ?? file.model ?? 'gpt-4o-mini'
   const apiKey = overrides.apiKey ?? process.env.MORTIS_API_KEY ?? file.apiKey
   const thinkingEffort = overrides.thinkingEffort ?? process.env.MORTIS_THINKING_EFFORT ?? file.thinkingEffort
-  return { baseUrl, model, apiKey, thinkingEffort }
+  const filesystem = overrides.filesystem ?? file.filesystem
+  return { baseUrl, model, apiKey, thinkingEffort, filesystem }
 }
 
 /** Default system prompt describing the agent's tools and behavior. */

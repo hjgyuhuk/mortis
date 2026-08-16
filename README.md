@@ -84,7 +84,15 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
   "baseUrl": "http://localhost:11434/v1",
   "model": "qwen2.5-coder",
   "apiKey": "sk-...",
-  "thinkingEffort": "high"
+  "thinkingEffort": "high",
+  "filesystem": {
+    "scratchDir": "/tmp",
+    "rules": [
+      { "path": "/data/projects", "access": "rw" },
+      { "path": "/etc/ssl/private", "access": "deny" },
+      { "path": "/var/log", "access": "r" }
+    ]
+  }
 }
 ```
 
@@ -101,7 +109,7 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 Built on pi-tui. **Enabled by default**; `--plain` is the only off switch:
 
 - No prompt argument drops into **interactive mode** (alt-screen chat layout): a **multi-line input box** — Enter submits, Shift+Enter breaks the line (`\`+Enter on terminals without Shift+Enter), ↑/↓ recalls history — with `/q` or Ctrl+D to exit and **answers accumulating** in a scrolling transcript
-- **Ctrl+C interrupts the in-flight run**: pending model requests and shell commands are cancelled, the session survives, and you can keep asking; when idle, Ctrl+C exits
+- **Esc interrupts the in-flight run immediately**: pending model requests and shell commands are cancelled and you are back in the input box; Ctrl+C interrupts too, and exits when idle
 - Transcript scrolling: mouse wheel / PageUp / PageDown / Home / End, auto-following new output; `Ctrl+Shift+F` full-text search; on exit the complete transcript is printed into the terminal's scrollback
 - **Thinking display**: model reasoning (`reasoning_content` / `reasoning` streams) shows as a live two-line preview above the input box while streaming, then settles into a gray `✻ thinking` block in the transcript; `--thinking-effort` controls reasoning effort
 - Tool calls within one turn **run concurrently**, commit in declaration order, and each row shows ✓ / ✗
@@ -151,6 +159,26 @@ class MyProvider implements ChatProvider {
 }
 ```
 
+## Filesystem Permissions
+
+`read` / `write` / `edit` are strictly governed by a five-zone policy (`src/fs-policy.ts`):
+
+| Precedence | Zone | Default | Access |
+|---|---|---|---|
+| 1 | custom | config.json `filesystem.rules` / CLI `--fs-rw` `--fs-r` `--fs-deny` | per rule: R / RW / DENY; longest prefix wins, overrides every built-in zone |
+| 2 | secrets | `~/.ssh`, `~/.mortis` | all access denied |
+| 3 | workspace | git root of cwd | read/write |
+| 4 | scratch | `/tmp` (configurable via `--scratch` / `filesystem.scratchDir`) | read/write |
+| 5 | outside | everything else | read-only |
+
+Paths are canonicalized through `realpath`, so symlink escapes are detected. Denials are returned to the model as text it can react to.
+
 ## Security Boundary
 
-Mortis has **no sandbox**. The system prompt asks it to work inside the current repository, but `write` / `edit` / `bash` accept arbitrary absolute paths and run arbitrary shell commands with no path or permission restrictions. Run it only with models and endpoints you trust.
+The file tools (read/write/edit) are strictly governed by the five-zone policy; **bash is confined by an OS-level sandbox**:
+
+- **macOS**: `sandbox-exec` (Seatbelt) — a global write deny with subpath allows for rw zones and read denies on denied zones, generated from the policy. Paths are realpath-normalized (the `/tmp` → `/private/tmp` alias is handled), so symlink escapes don't work; timeouts terminate the sandboxed child processes too
+- **Linux**: bubblewrap (`bwrap`, must be installed) — read-only root bind, rw zones bind-mounted writable, denied zones masked with tmpfs
+- **Unavailable or `--no-sandbox`**: honest degradation — a startup warning, and both the system prompt and the tool description state plainly that bash is unsandboxed
+
+Seatbelt has known historical escapes; this is a strong constraint, not an absolute boundary. Stay careful with fully untrusted models.
