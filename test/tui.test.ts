@@ -9,12 +9,17 @@ function render(tui: AgentTui, width = 80): string[] {
 
 /** Wire input without raw mode and submit a prompt. */
 async function submit(tui: AgentTui, prompt: string, run?: (p: string) => Promise<string>) {
-  const input = (tui as unknown as {
-    wireInput(run: (p: string) => Promise<string>): { onSubmit(p: string): void }
-  }).wireInput(run ?? (async () => 'answer text'))
+  const input = wire(tui, run)
   input.onSubmit(prompt)
   await new Promise((resolve) => setTimeout(resolve, 0))
   return render(tui)
+}
+
+/** Access the interactive-mode input wiring. */
+function wire(tui: AgentTui, run?: (p: string) => Promise<string>): { onSubmit(p: string): void } {
+  return (tui as unknown as {
+    wireInput(run: (p: string) => Promise<string>): { onSubmit(p: string): void }
+  }).wireInput(run ?? (async () => 'answer text'))
 }
 
 describe('AgentTui rendering', () => {
@@ -61,23 +66,78 @@ describe('AgentTui rendering', () => {
 })
 
 describe('AgentTui interactive', () => {
+  it('renders the chat layout with header and a boxed input', () => {
+    const lines = render(new AgentTui('my-model', 'http://x/v1', { interactive: true }))
+    expect(lines.some((l) => l.includes('mortis — my-model'))).toBe(true)
+    expect(lines.some((l) => l.includes('╭'))).toBe(true)
+    expect(lines.some((l) => l.includes('│'))).toBe(true)
+    expect(lines.some((l) => l.includes('╰'))).toBe(true)
+  })
+
+  it('renders tool rows in the interactive transcript', () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    tui.handle({ kind: 'model_request' })
+    tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{"command":"ls"}' })
+    tui.handle({ kind: 'tool_result', toolCallId: 'c1', resultSummary: '"ok"' })
+    const lines = render(tui)
+    expect(lines.some((l) => l.includes('bash'))).toBe(true)
+    expect(lines.some((l) => l.includes('✓'))).toBe(true)
+  })
+
   it('shows the submitted prompt and the answer', async () => {
-    const lines = await submit(new AgentTui('m', 'http://x/v1'), 'add a readme')
+    const lines = await submit(new AgentTui('m', 'http://x/v1', { interactive: true }), 'add a readme')
     expect(lines.some((l) => l.includes('add a readme'))).toBe(true)
     expect(lines.some((l) => l.includes('answer text'))).toBe(true)
+    // The echoed prompt is dark yellow; the input box has no "> " prefix.
+    expect(lines.some((l) => l.includes('add a readme') && l.includes('\u001b[33m'))).toBe(true)
+    expect(lines.some((l) => l.includes('│ >'))).toBe(false)
+  })
+
+  it('accumulates answers across multiple submissions', async () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    const input = wire(tui)
+    input.onSubmit('first prompt')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    input.onSubmit('second prompt')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const lines = render(tui)
+    expect(lines.some((l) => l.includes('first prompt'))).toBe(true)
+    expect(lines.some((l) => l.includes('second prompt'))).toBe(true)
+    expect(lines.filter((l) => l.includes('answer text')).length).toBeGreaterThanOrEqual(2)
   })
 
   it('renders an error line when the run fails', async () => {
     const lines = await submit(
-      new AgentTui('m', 'http://x/v1'),
+      new AgentTui('m', 'http://x/v1', { interactive: true }),
       'do something',
       async () => { throw new Error('boom') },
     )
     expect(lines.some((l) => l.includes('error: boom'))).toBe(true)
   })
 
+  it('ignores submissions while a run is in flight', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    const input = wire(tui, async () => {
+      await gate
+      return 'first answer'
+    })
+
+    input.onSubmit('first')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    input.onSubmit('second')
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const lines = render(tui)
+    expect(lines.some((l) => l.includes('first answer'))).toBe(true)
+    expect(lines.some((l) => l.includes('> second'))).toBe(false)
+  })
+
   it('passes /q to runPrompt when addInputListener is not active', async () => {
-    const tui = new AgentTui('m', 'http://x/v1')
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
     let ran = false
     const input = (tui as unknown as {
       wireInput(run: (p: string) => Promise<string>): { onSubmit(p: string): void }

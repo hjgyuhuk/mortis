@@ -8,7 +8,7 @@
 - `src/provider/openai.ts` — OpenAI API 兼容供应商
 - `src/tools/index.ts` — 内置工具 read / write / edit / bash
 - `src/agent/loop.ts` + `src/agent/events.ts` — Agent 循环 + 事件回调
-- `src/tui/index.ts` — pi-tui 终端 UI；含交互模式（输入框 + 答案累积）
+- `src/tui/index.ts` — pi-tui 终端 UI；交互模式用 TuiAltScreen 聊天布局（ScrollView transcript + 固定输入框，答案累积），单次模式用 TuiMainScreen
 - `src/cli.ts` — CLI 入口；无 prompt 参数且非 --plain 时进交互 TUI
 - `test/` — vitest：agent 用脚本化 mock provider，provider 用本地 mock HTTP 服务器
 
@@ -23,7 +23,7 @@
 
 ## 命令
 
-- `pnpm dev` — 交互式 TUI（输入框，Ctrl+D 退出）；`pnpm dev <prompt>` — 单次运行；`--plain` 关闭 TUI
+- `pnpm dev` — 交互式 TUI（输入框，/q 或 Ctrl+C/Ctrl+D 退出）；`pnpm dev <prompt>` — 单次运行；`--plain` 关闭 TUI
 - `pnpm build` — tsc 编译到 dist/
 - `pnpm typecheck` — 类型检查
 - `pnpm test` — vitest

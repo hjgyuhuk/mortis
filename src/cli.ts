@@ -95,7 +95,7 @@ async function main() {
   // where the prompt is typed in the input box. Model/provider come from the
   // resolved config only — no setup phase.
   if (useTui && !argPrompt) {
-    const tui = new AgentTui(config.model, config.baseUrl)
+    const tui = new AgentTui(config.model, config.baseUrl, { interactive: true })
     const agent = new Agent({
       provider,
       tools: builtinTools,

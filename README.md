@@ -43,7 +43,7 @@ MORTIS_BASE_URL=http://localhost:11434/v1 MORTIS_MODEL=qwen2.5-coder pnpm dev "�
 pnpm build
 node dist/cli.js --base-url http://localhost:11434/v1 --model qwen2.5-coder "列出项目文件"
 
-# 直接进入交互式 TUI：无 prompt 参数即在输入框输入任务，Enter 提交，/q 或 Ctrl+D 退出
+# 直接进入交互式 TUI（备用屏幕聊天布局）：无 prompt 参数即在输入框输入任务，Enter 提交，/q 或 Ctrl+C/Ctrl+D 退出
 pnpm dev
 pnpm dev "写个 fibonacci.ts 并运行验证"
 pnpm dev --plain "写个 fibonacci.ts 并运行验证"
@@ -81,12 +81,11 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 
 基于 pi-tui。**默认启用**，`--plain` 是唯一关闭开关：
 
-- 无 prompt 参数时**直接进入交互模式**：内置输入框，Enter 提交任务、`/q` 或 Ctrl+D 退出，多轮对话答案累积
-- header：模型 + base URL
-- 每轮工具调用一行，运行中 spinner 动画，完成后 ✓ 与结果摘要
-- 最终答案按 markdown 渲染
+- 无 prompt 参数时**直接进入交互模式**（备用屏幕聊天布局）：内置输入框，Enter 提交任务、`/q` 或 Ctrl+C/Ctrl+D 退出，**多轮答案累积**在滚动 transcript 里
+- transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
+- 带 prompt 参数的单次运行用主屏流式渲染：每轮工具调用一行，完成后 ✓ 与结果摘要，最终答案按 markdown 渲染
 
-实现：agent 通过 `onEvent` 回调发事件（`model_request` / `tool_start` / `tool_result`），`AgentTui` 订阅并驱动 pi-tui 组件树。模型与端点只从配置解析，无设置阶段。
+实现：agent 通过 `onEvent` 回调发事件（`model_request` / `assistant_text` / `tool_start` / `tool_result`），`AgentTui` 订阅并驱动 pi-tui 组件树。模型与端点只从配置解析，无设置阶段。
 
 ## 自定义供应商
 
