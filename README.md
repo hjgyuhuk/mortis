@@ -1,123 +1,156 @@
-# Mortis — 最小 Coding Agent 学习项目
+# Mortis — A Minimal Coding Agent
 
-实现最小 coding agent。核心循环：**接收 prompt → 调用 LLM → 执行工具 → 反馈结果 → 循环直到完成**。
+[English](./README.md) | [中文](./README.zh_CN.md)
 
-不涉及多会话、复杂作用域，只关注一个可运行、可测试的最小闭环。
+A minimal coding agent built as a learning project. Core loop: **receive prompt → call LLM → execute tools → feed results back → repeat until done** — wrapped in a small state machine with structured effect lifetimes.
 
-## 结构
+No multi-session management, no complex scoping: just one runnable, testable, minimal loop.
+
+## Highlights
+
+- **Streaming OpenAI-compatible provider** — SSE parsing, incremental tool-call stitching, non-SSE fallback, reasoning streams (`reasoning_content` / `reasoning`), cancellable via `AbortSignal`
+- **Chat-style TUI** — alt-screen layout with a scrolling transcript, multi-line editor, live thinking preview, and per-tool rows; the full transcript is printed into scrollback on exit
+- **Interruptible** — Ctrl+C cancels the in-flight model request and child processes, finalizes the state, and keeps the session usable
+- **Parallel tools, deterministic state** — tool calls in one turn run concurrently but commit in declaration order; history is append-only so provider prefix caching keeps hitting
+- **Session resume** — checkpoints on every state transition; `--continue` picks the conversation back up
+
+## Structure
 
 ```
 src/
-├── types.ts           # 共享类型：Message / Tool / ChatProvider / ModelResponse
-├── provider/
-│   └── openai.ts      # OpenAI API 兼容供应商（自定义 baseUrl + model）
-├── tools/
-│   └── index.ts       # 内置工具：read / write / edit / bash
+├── types.ts           # Message, Tool(+ToolContext), Decision, Effect, ChatProvider
+├── config.ts          # Config resolution; defaultSystemPrompt(tools, agentsMd)
+├── instructions.ts    # AGENTS.md discovery (global + git root→cwd)
 ├── agent/
-│   ├── loop.ts        # Agent 循环核心
-│   └── events.ts      # 循环事件（TUI 订阅）
+│   ├── state.ts       # AgentState + reduce() — the only mutation authority
+│   ├── loop.ts        # Agent loop (think → act) + RunInterruptedError
+│   ├── scope.ts       # Parent-linked cancellation scopes (Agent > Run > Effect)
+│   └── events.ts      # Domain events (no UI semantics)
+├── provider/
+│   └── openai.ts      # OpenAI-compatible provider: SSE, tool-call stitching, reasoning
+├── tools/
+│   └── index.ts       # read / write / edit / bash
+├── session.ts         # Versioned SessionSnapshot + latest.json checkpoints
 ├── tui/
-│   └── index.ts       # pi-tui 终端 UI
-├── config.ts          # 配置解析（CLI > env > ~/.mortis/config.json > 默认）
-├── cli.ts             # CLI 入口
-└── index.ts           # 库公共出口
-test/
-├── agent.test.ts         # Agent 循环测试（脚本化 mock provider）
-├── provider.test.ts      # Provider 测试（本地 mock HTTP 服务器）
-├── tools.test.ts         # 内置工具测试（read / write / edit / bash）
-├── tui.test.ts           # TUI 渲染测试
-├── instructions.test.ts  # AGENTS.md 发现与加载测试
-└── config.test.ts        # 配置解析测试
+│   └── index.ts       # pi-tui terminal UI (interactive chat + oneshot layouts)
+├── cli.ts             # CLI entrypoint
+└── index.ts           # Public library surface
+test/                  # vitest suites, incl. property-based state invariants
 ```
 
-## 用法
+## Usage
 
 ```sh
-# 安装
+# Install
 pnpm install
 
-# 运行（面对任意 OpenAI 兼容端点）
-MORTIS_BASE_URL=http://localhost:11434/v1 MORTIS_MODEL=qwen2.5-coder pnpm dev "给当前目录写一个 README.md"
+# Run against any OpenAI-compatible endpoint
+MORTIS_BASE_URL=http://localhost:11434/v1 MORTIS_MODEL=qwen2.5-coder pnpm dev "write a README.md for this directory"
 
-# 或带参数
+# Or with flags
 pnpm build
-node dist/cli.js --base-url http://localhost:11434/v1 --model qwen2.5-coder "列出项目文件"
+node dist/cli.js --base-url http://localhost:11434/v1 --model qwen2.5-coder "list project files"
 
-# 直接进入交互式 TUI（备用屏幕聊天布局）：无 prompt 参数即在输入框输入任务，Enter 提交，/q 或 Ctrl+D 退出；Ctrl+C 中断运行中的回合（保留会话）
+# Interactive TUI (alt-screen chat layout): type in the input box, Enter submits,
+# /q or Ctrl+D exits; Ctrl+C interrupts the in-flight run and keeps the session
 pnpm dev
-pnpm dev "写个 fibonacci.ts 并运行验证"
-pnpm dev --plain "写个 fibonacci.ts 并运行验证"
+pnpm dev "write fibonacci.ts and run it"
+pnpm dev --plain "write fibonacci.ts and run it"
 
-# 恢复最近一次会话继续聊（checkpoint 在每次状态转移后写入）
+# Resume the latest session (checkpoints are written on every state transition)
 pnpm dev --continue
 
-# 测试
+# Control reasoning effort (sent as thinking_effort; also configurable via
+# MORTIS_THINKING_EFFORT or ~/.mortis/config.json)
+pnpm dev --thinking-effort high
+
+# Tests
 pnpm test
 ```
 
-## 配置
+## Configuration
 
-配置目录 `~/.mortis`，配置文件 `~/.mortis/config.json`。**首次运行会自动创建目录与配置文件**（只写入 baseUrl 与 model；**apiKey 永不自动落盘**——来自环境变量或 CLI 参数的 key 只在本次运行生效），无需手动 `--init`。
+Config directory `~/.mortis`, config file `~/.mortis/config.json`. **First run creates both automatically** (only baseUrl and model are written; **apiKey is never auto-persisted** — keys from env vars or CLI flags live for that run only). No manual `--init` needed.
 
-解析优先级：**CLI 参数 > 环境变量 > 配置文件 > 默认值**。
+Precedence: **CLI args > environment variables > config file > defaults**.
 
 ```sh
-# 初始化配置文件（写入 ~/.mortis/config.json）；首次运行也会自动创建
+# Initialize the config file explicitly; the first run does this too
 pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
+```
 
-# ~/.mortis/config.json 内容示例
+```json
 {
   "baseUrl": "http://localhost:11434/v1",
   "model": "qwen2.5-coder",
-  "apiKey": "sk-..."
+  "apiKey": "sk-...",
+  "thinkingEffort": "high"
 }
 ```
 
-| 配置项 | CLI 参数 | 环境变量 | 默认 |
+| Option | CLI flag | Env var | Default |
 |---|---|---|---|
 | Base URL | `--base-url` | `MORTIS_BASE_URL` | `https://api.openai.com/v1` |
-| 模型 | `--model` | `MORTIS_MODEL` | `gpt-4o-mini` |
-| API Key | `--api-key` | `MORTIS_API_KEY` | 无 |
-| 思考强度 | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | 不发送 |
-| TUI | `--plain` 禁用 | — | TTY 下启用 |
+| Model | `--model` | `MORTIS_MODEL` | `gpt-4o-mini` |
+| API Key | `--api-key` | `MORTIS_API_KEY` | none |
+| Thinking effort | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | not sent |
+| TUI | `--plain` disables | — | enabled |
 
-## 终端 UI
+## Terminal UI
 
-基于 pi-tui。**默认启用**，`--plain` 是唯一关闭开关：
+Built on pi-tui. **Enabled by default**; `--plain` is the only off switch:
 
-- 无 prompt 参数时**直接进入交互模式**（备用屏幕聊天布局）：**多行输入框**，Enter 提交、Shift+Enter 换行（不支持 Shift+Enter 的终端用行尾 `\`+Enter），↑/↓ 翻提交历史，`/q` 或 Ctrl+D 退出，**多轮答案累积**在滚动 transcript 里
-- **Ctrl+C 中断运行中的回合**：取消在飞的模型请求和 shell 命令，会话保留、可继续提问；空闲时按 Ctrl+C 直接退出
-- **思考过程呈现**：模型返回的 reasoning（`reasoning_content` / `reasoning` 流）以 `✻ thinking` 暗色斜体块流式显示在答案上方，回看 transcript 时保留；配置 `--thinking-effort` 可控制思考强度（作为 `thinking_effort` 发送）
-- transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
-- 同一轮的多个工具调用**并发执行**，结果按声明顺序提交；工具行各自显示 ✓ / ✗
-- 带 prompt 参数的单次运行用主屏流式渲染：每轮工具调用一行，完成后 ✓ 与结果摘要，最终答案按 markdown 渲染
+- No prompt argument drops into **interactive mode** (alt-screen chat layout): a **multi-line input box** — Enter submits, Shift+Enter breaks the line (`\`+Enter on terminals without Shift+Enter), ↑/↓ recalls history — with `/q` or Ctrl+D to exit and **answers accumulating** in a scrolling transcript
+- **Ctrl+C interrupts the in-flight run**: pending model requests and shell commands are cancelled, the session survives, and you can keep asking; when idle, Ctrl+C exits
+- Transcript scrolling: mouse wheel / PageUp / PageDown / Home / End, auto-following new output; `Ctrl+Shift+F` full-text search; on exit the complete transcript is printed into the terminal's scrollback
+- **Thinking display**: model reasoning (`reasoning_content` / `reasoning` streams) shows as a live two-line preview above the input box while streaming, then settles into a gray `✻ thinking` block in the transcript; `--thinking-effort` controls reasoning effort
+- Tool calls within one turn **run concurrently**, commit in declaration order, and each row shows ✓ / ✗
+- A single prompt argument uses the main-screen streaming view: one row per tool call, ✓ and a result summary when done, final answer rendered as markdown
 
-实现：agent 通过 `onEvent` 回调发 Domain 事件（`model_request` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`），`AgentTui` 订阅并派生全部显示。模型与端点只从配置解析，无设置阶段。
+Implementation: the agent emits **domain events** (`model_request` / `assistant_thinking` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`) via `onEvent`; `AgentTui` subscribes and derives all display concerns from them. Model and endpoint come from the resolved config only — no setup phase.
 
-## 自定义供应商
+## Architecture
 
-`ChatProvider` 是唯一抽象。OpenAI 兼容端点直接可用；其他协议实现 `ChatProvider` 即可接入：
+The core is a small state machine; everything else observes it:
+
+```
+State → think → Decision → act (effects) → results → reduce → State
+```
+
+Seven invariants (see [AGENTS.md](./AGENTS.md)):
+
+1. State is plain, serializable data (`messages` + a derived `status`)
+2. `reduce()` is the only state mutation authority
+3. Decisions describe intent and never execute; Effects never mutate state
+4. Effects may run concurrently; transitions are serial and deterministic — concurrent execution, ordered commit
+5. Scopes own effect lifetimes; every run cleans up (Agent > Run > Effect parent chain)
+6. The agent core knows no TUI, persistence, or runtime — they only observe state/events
+7. History is append-only — every event (including interrupt fill) only appends, so request prefixes stay byte-stable and provider prefix caching keeps hitting
+
+Consequences:
+
+- **Decision ≠ model output**: the model's response is interpreted as intent (`respond` / `execute` / `wait` / `finish`); tool calls are one kind of `Effect`
+- **Interruption is a real transition**: `run_interrupted` appends synthetic results for dangling tool calls, so any non-running state is directly sendable and a session survives cancel/crash/resume
+- **Cancellation is layer-mapped**: effects see a native `AbortError`, the loop raises `RunInterruptedError`, the UI renders a notice — no error class crosses all layers
+- **Observers at the boundary**: the TUI and session persistence only observe; checkpoints (`SessionSnapshot` versioned, validated on hydrate) are written after every transition, so a crash loses at most the transition in flight
+- **Explicit failure**: tools return error text to the model instead of throwing; timeouts and cancellation are built in (bash: default 120s, max 600s)
+- **Tested as contracts**: mock HTTP servers for the provider, scripted providers for the loop, and property-based tests that replay random event sequences against the state invariants
+
+## Custom Providers
+
+`ChatProvider` is the only abstraction. Any OpenAI-compatible endpoint works out of the box; other protocols implement the interface:
 
 ```ts
 import type { ChatProvider, Message, StreamChunk, Tool } from 'mortis-agent'
 
 class MyProvider implements ChatProvider {
-  async *completeStream(messages: Message[], tools: Tool[]): AsyncGenerator<StreamChunk> {
-    // 你的协议实现：流式产出 { kind: 'text', delta } 或 { kind: 'tool_calls', tool_calls }
+  async *completeStream(messages: Message[], tools: Tool[], signal?: AbortSignal): AsyncGenerator<StreamChunk> {
+    // your protocol: yield { kind: 'thinking' | 'text', delta } chunks, then
+    // one { kind: 'tool_calls', tool_calls } chunk; honor the signal for cancel
   }
 }
 ```
 
-## 安全边界
+## Security Boundary
 
-Mortis **没有沙箱**。系统提示要求在当前仓库内工作，但 `write` / `edit` / `bash` 接受任意绝对路径、可执行任意 shell 命令，实际不做任何路径或权限限制。只在你信任模型与端点的环境下运行。
-
-## 核心思想
-
-- **状态机内核**：`State → think → Decision → act(Effect) → Result → reduce → State`。State 是普通可序列化数据（`messages` + 派生的 `status`），reducer 是唯一的状态变换点。
-- **Decision 与 Effect 分离**：模型输出被解释为意图（respond / execute / wait / finish），tool 调用是一种 Effect；副作用并发执行，状态转移按声明顺序串行提交（deterministic）。
-- **Effect Scope 生命周期**：父链 Scope（Agent > Run > Effect）统一管理取消与清理；Ctrl+C 中断的是 Run，不是进程。
-- **强类型自文档化**：类型即契约，`Message`/`Decision`/`ChatProvider` 直接映射 OpenAI wire 格式。
-- **显式失败**：工具错误返回文本给模型而非抛异常，模型可据此调整；中断是正式的状态转移（`run_interrupted`），悬空 tool 调用自动补齐，会话始终可恢复。
-- **观察者边界**：TUI 与持久化只观察 State/事件；checkpoint 在每次转移后写入，`--continue` 恢复。
-- **测试驱动**：provider 用本地 mock 服务器，agent 用脚本化 mock provider，reducer 有随机序列的不变量测试。
+Mortis has **no sandbox**. The system prompt asks it to work inside the current repository, but `write` / `edit` / `bash` accept arbitrary absolute paths and run arbitrary shell commands with no path or permission restrictions. Run it only with models and endpoints you trust.

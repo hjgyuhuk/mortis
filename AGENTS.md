@@ -24,6 +24,7 @@
 4. Effect 可以并发，但 State transition 必须串行且 deterministic（并发执行、按声明顺序提交）
 5. Scope 拥有 Effect 的生命周期，Run 结束必须清理
 6. Agent Core 不知道 TUI、Persistence、具体 Runtime —— UI 与持久化只观察 State/事件
+7. **对话历史只追加、不修改**：所有事件（含中断补齐、awaiting_user）都只 append，从不回改既有消息——请求前缀逐字节稳定，供应商前缀缓存可命中；system prompt 在进程内只构建一次，`--continue` 从快照原样恢复（含首条 system 消息）
 
 职责边界：Model → Decision，Tool → ToolResult，Runtime → 执行 Effect，Reducer → 唯一改 State，UI / Persistence → 只观察。
 

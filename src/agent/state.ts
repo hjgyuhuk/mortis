@@ -8,6 +8,8 @@
  *
  * Invariants (see AGENTS.md):
  * - State is plain, serializable data.
+ * - History is append-only: reduce() never modifies existing messages, so
+ *   the request prefix stays byte-stable and provider prefix caching hits.
  * - Any state whose status is not 'running' is directly sendable: every
  *   assistant tool_calls message has matching tool results. `run_interrupted`
  *   guarantees this by appending synthetic results for dangling calls — it is

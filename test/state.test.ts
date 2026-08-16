@@ -133,12 +133,17 @@ describe('state invariants (property-style)', () => {
     const ids = ['c1', 'c2', 'c3']
     let state = initialState('sys')
     for (let step = 0; step < 200; step++) {
+      const previous = state
       state = reduce(state, randomEvent(random, ids))
       expect(STATUSES).toContain(state.status)
       if (state.status !== 'running') {
         expect(isSendable(state)).toBe(true)
       }
       expect(structuredClone(state)).toEqual(state)
+      // Append-only: the old messages are always an exact prefix of the new
+      // ones — the property provider prefix caching relies on.
+      expect(state.messages.length).toBeGreaterThanOrEqual(previous.messages.length)
+      expect(state.messages.slice(0, previous.messages.length)).toEqual(previous.messages)
     }
   })
 })

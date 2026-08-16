@@ -17,6 +17,7 @@ Six core invariants (see AGENTS.md for the full contract):
 4. Effects may run concurrently; transitions are serial and deterministic (concurrent execution, ordered commit)
 5. Scopes own effect lifetimes; run end must clean up (Agent > Run > Effect parent chain)
 6. Agent core knows no TUI / Persistence / Runtime — they observe state/events
+7. History is append-only: every event (incl. interrupt fill / awaiting_user) only appends; request prefix stays byte-stable so provider prefix caching hits. System prompt is built once per process; --continue restores snapshot messages verbatim
 
 - [Type System] strict + noUncheckedIndexedAccess, types as contracts
 - [Wire Format] Messages mirror OpenAI wire vocabulary; omit `tools` field when empty

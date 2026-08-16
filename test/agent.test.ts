@@ -306,6 +306,36 @@ describe('Agent loop', () => {
     expect(tools.map((m) => m.content)).toEqual(['A', 'B', 'C'])
   })
 
+  it('sends an append-only history: each request extends the previous one', async () => {
+    const fakeTool: Tool = {
+      name: 'bash',
+      description: '',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        return 'ok'
+      },
+    }
+    const provider = new ScriptedProvider([
+      { kind: 'tool_calls', tool_calls: [makeCall('c1', 'bash', '{"command":"ls"}')] },
+      { kind: 'text', content: 'first done' },
+      { kind: 'text', content: 'second done' },
+    ])
+    const agent = new Agent({ provider, tools: [fakeTool], systemPrompt: 'sys' })
+
+    await agent.run('one')
+    await agent.run('two')
+
+    // Every provider request must start with the exact previous request's
+    // messages — the prefix provider caching matches on.
+    for (let i = 1; i < provider.calls.length; i++) {
+      const previous = provider.calls[i - 1]!
+      const current = provider.calls[i]!
+      expect(current.length).toBeGreaterThanOrEqual(previous.length)
+      expect(current.slice(0, previous.length)).toEqual(previous)
+    }
+    expect(provider.calls).toHaveLength(3)
+  })
+
   it('continues from a restored state', async () => {
     let prior = initialState('sys')
     prior = reduce(prior, { type: 'user_message', content: 'earlier' })
