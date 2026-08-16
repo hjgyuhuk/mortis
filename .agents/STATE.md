@@ -5,45 +5,52 @@ description: Dynamic progress, lessons learned, and next steps.
 
 # Active Phase & Focus
 
-* Current: Streaming implementation complete, bug fixes validated
+* Current: TUI chat-layout refactor and full code-review fix pass complete; feature-complete for the minimal loop
 
 # Progress
 
 ## Done
 
-* [Streaming Architecture] `ChatProvider` changed to `completeStream()` returning `AsyncIterable<StreamChunk>` — 29 tests pass
-* [SSE Parser] Manual SSE parsing with UTF-8 cross-chunk handling, `[DONE]` marker, fallback to JSON
-* [Tool-call Stitching] `ToolCallBuilder` accumulates index fragments, handles `id:null`/`name:null` from mimo-v2.5
-* [Agent Loop] Consumes stream, emits `assistant_delta` events with cumulative content
-* [TUI Streaming] `Text` component for live updates, `finalizeAnswer` replaces with `Markdown`
-* [Regression Test] Added test for `id:null` fragments in tool-call stitching
+* [Code-review fixes] non-SSE multi tool_calls kept separate; empty `tools` omitted from wire; baseUrl strips all trailing slashes; SSE JSON.parse errors carry payload context — tests pass
+* [Config hygiene] `ensureFileConfig` never persists apiKey — test asserts file has no key after env-key run
+* [Tool hardening] edit requires unique match; read truncates at 64KiB; bash has timeout param (120s default, 600s max) — test/tools.test.ts (11 cases)
+* [Event rename] `assistant_delta` → `assistant_text` (payload is cumulative text)
+* [TUI refactor] interactive mode → TuiAltScreen chat layout: ScrollView transcript (follow:end), loader status row, boxed input; answers accumulate (removed `answers.clear()`); exit prints full transcript to scrollback — 61/61 tests, pty smoke verified
+* [Input polish] BorderedBox frame + BareInput (no "> " prefix); prompt echo in dark yellow (ANSI 33); Ctrl+C exit added
+* [System prompt] `defaultSystemPrompt(tools, agentsMd?)` builds tool list from actual Tools
+* [Typecheck] tsconfig.test.json; `pnpm typecheck` covers src + test
 
 ## In Progress
 
-* None — streaming implementation complete
+* None
 
 ## Blocked
 
 * None
 
-# Lessons Learned
+# Lessons Learned (Monadic Abstraction)
 
 ## ❌ Anti-patterns & Failed Hypotheses
 
-* **Null vs Undefined in Wire Protocols** — OpenAI-compatible endpoints may send `null` for optional fields in SSE delta fragments (e.g., `id:null`, `name:null`), not just omit them. Using `!== undefined` fails to filter these; use `!= null` to catch both.
+* **`basis: 0` in unbounded render** — pi-tui `VStack.render()` (used for the alt-screen exit document) gives grow entries their basis, clamped to minSize — official README pattern (`basis:0, grow:1`) silently truncates the exit transcript to 1 line — detected by asserting full content in `ui.render()` tests
+* **Mirroring keystrokes to track input state** — manually accumulating a char buffer desyncs on paste/cursor movement — read `input.getValue()` at event time instead
+* **Null vs undefined in wire protocols** — OpenAI-compatible endpoints send `id:null`/`name:null` in delta fragments; `!== undefined` fails to filter — use `!= null`
 
 ## ✅ Viable Paths & Confirmed Patterns
 
-* **SSE Manual Parsing** — Hand-rolled SSE parser with `TextDecoder` + buffer splitting works reliably across chunk boundaries when using `{ stream: true }`.
-* **Streaming Text → Markdown Finalization** — Use `Text` for incremental updates during streaming, then replace with `Markdown` in `finalizeAnswer()` for rich formatting without per-token reflow cost.
-* **Tool-call Index Stitching** — Accumulate `delta.tool_calls` by index; first chunk carries `id`/`name`, subsequent chunks only `arguments`. Filter out `null` fields explicitly.
+* **Alt-screen chat layout** — `TuiAltScreen` + `VStack[header, ScrollView(transcript, follow:'end', primary), bottom]`: in-session scrollback, Ctrl+Shift+F search, stable resize, full transcript printed to scrollback on exit. Transcript entry must use `basis:'auto', grow:1, shrink:1`
+* **pi-tui input listener ordering** — `addInputListener` callbacks run before the focused component; `{consume:true}` intercepts keys (e.g. `/q` on Enter). Default `lineUp/lineDown` are unbound, so arrows reach the Input
+* **Wrapping over forking** — `BareInput`/`BorderedBox` wrap pi-tui components (render at adjusted width, slice/pad, pass through invalidate) instead of duplicating component internals
+* **SSE manual parsing** — TextDecoder + buffer splitting with `{stream:true}`, `[DONE]` marker, non-SSE JSON fallback
+* **Streaming Text → Markdown finalization** — live `Text` during streaming, swap to `Markdown` in `finalizeAnswer()`
+* **Tool-call index stitching** — accumulate by index; filter `null` fields; non-SSE path uses array index
 
 # Key Decisions & Trade-offs
 
-* **Single `completeStream` method** — Replaced `complete()` with streaming-only interface. Non-SSE endpoints handled by reading full JSON and yielding a single chunk.
-* **`assistant_delta` carries cumulative text** — TUI receives full text so far, not incremental deltas. Simplifies TUI logic (no accumulation needed), but means each delta is O(n) in text length.
-* **`!= null` over `!== undefined`** — Defensive against wire formats that use `null` for absent optional fields.
+* **Transcript accumulation via alt screen (not main-screen scrollback)** — in-session scrolling/search, no resize scrollback wipe — rejected the 1-line `answers.clear()` removal for worse UX
+* **`assistant_text` carries cumulative text** — TUI needs no accumulation; each event O(n) in text length
+* **Empty containers render 0 lines in pi-tui** — status row with transient Loader collapses naturally; no placeholder needed
 
 # Immediate Next Steps
 
-* None — core streaming implementation validated end-to-end
+* Optional: AbortSignal through `ChatProvider.completeStream` + cancel key in TUI (only remaining review item; changes public interface)
