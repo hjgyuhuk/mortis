@@ -180,6 +180,59 @@ describe('OpenAIProvider', () => {
     ])
   })
 
+  it('keeps multiple tool calls separate in a non-SSE JSON response', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  { id: 'call_1', type: 'function', function: { name: 'bash', arguments: '{"command":"ls"}' } },
+                  { id: 'call_2', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' } },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(chunks).toEqual([
+      {
+        kind: 'tool_calls',
+        tool_calls: [
+          { id: 'call_1', type: 'function', function: { name: 'bash', arguments: '{"command":"ls"}' } },
+          { id: 'call_2', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' } },
+        ],
+      },
+    ])
+  })
+
+  it('omits the tools field when no tools are given', async () => {
+    const requests: Array<Record<string, unknown>> = []
+    const { url } = await openServer((req, res) => {
+      let body = ''
+      req.on('data', (chunk) => (body += chunk))
+      req.on('end', () => {
+        requests.push(body ? JSON.parse(body) : null)
+        res.setHeader('Content-Type', 'text/event-stream')
+        res.end(sse([{ choices: [{ delta: { content: 'ok' } }] }]))
+      })
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).not.toHaveProperty('tools')
+  })
+
   it('throws a readable error on non-200 responses', async () => {
     const { url } = await openServer((_req, res) => {
       res.statusCode = 401

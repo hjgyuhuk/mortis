@@ -53,14 +53,14 @@ export class Agent {
       this.onEvent?.({ kind: 'model_request' })
 
       // Consume the streamed response: accumulate any text deltas and collect
-      // tool requests. Text deltas are streamed to the observer as they arrive
-      // so the TUI can render incrementally.
+      // tool requests. The accumulated text is streamed to the observer as it
+      // grows so the TUI can render incrementally.
       let content = ''
       let toolCalls: ToolCall[] = []
       for await (const chunk of this.provider.completeStream(this.messages, this.tools)) {
         if (chunk.kind === 'text') {
           content += chunk.delta
-          this.onEvent?.({ kind: 'assistant_delta', content })
+          this.onEvent?.({ kind: 'assistant_text', content })
         } else {
           toolCalls = chunk.tool_calls
         }

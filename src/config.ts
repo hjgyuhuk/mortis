@@ -6,6 +6,7 @@
 import { homedir } from 'node:os'
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import type { Tool } from './types.js'
 
 export interface Config {
   /** Base URL of the OpenAI-compatible endpoint. */
@@ -49,13 +50,15 @@ export function writeFileConfig(config: Partial<Config>): void {
 }
 
 /**
- * Ensure `~/.mortis/config.json` exists, writing `config` (the resolved
- * config, including defaults) when the file or directory is missing. Call at
- * startup so the config is always on disk.
+ * Ensure `~/.mortis/config.json` exists, writing the resolved baseUrl/model
+ * when the file or directory is missing. The apiKey is never persisted here:
+ * it may come from the environment or CLI flags and would otherwise leak into
+ * a plaintext file. Call at startup so defaults are always on disk.
  */
 export function ensureFileConfig(config: Config): Config {
   if (!existsSync(configPath())) {
-    writeFileConfig(config)
+    const { apiKey: _apiKey, ...persisted } = config
+    writeFileConfig(persisted)
   }
   return config
 }
@@ -74,13 +77,19 @@ export function resolveConfig(overrides: Partial<Config> = {}): Config {
 }
 
 /** Default system prompt describing the agent's tools and behavior. */
-export function defaultSystemPrompt(agentsMd?: string): string {
-  const base = [
+export function defaultSystemPrompt(tools: Tool[], agentsMd?: string): string {
+  const names = tools.map((tool) => tool.name).join(', ')
+  const lines = [
     'You are Mortis, a coding agent. You help the user solve tasks in their repository.',
-    'Use the available tools (read, write, edit, bash) to inspect and modify files.',
+  ]
+  if (names) {
+    lines.push(`Use the available tools (${names}) to inspect and modify files.`)
+  }
+  lines.push(
     'Prefer reading files before editing them. When the task is done, answer with a',
     'concise summary of what you changed.',
-  ].join('\n')
+  )
+  const base = lines.join('\n')
   if (!agentsMd) return base
   return base + '\n\n' + agentsMd
 }

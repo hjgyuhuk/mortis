@@ -155,7 +155,7 @@ describe('Agent loop', () => {
       resultSummary: '"done"',
     })
     expect(onEvent).toHaveBeenNthCalledWith(4, { kind: 'model_request' })
-    expect(onEvent).toHaveBeenNthCalledWith(5, { kind: 'assistant_delta', content: 'final' })
+    expect(onEvent).toHaveBeenNthCalledWith(5, { kind: 'assistant_text', content: 'final' })
     expect(onEvent).toHaveBeenCalledTimes(5)
   })
 
@@ -168,9 +168,9 @@ describe('Agent loop', () => {
 
     expect(result).toBe('Hello, streaming world!')
     expect(onEvent).toHaveBeenNthCalledWith(1, { kind: 'model_request' })
-    const deltas = onEvent.mock.calls.filter(([e]) => e.kind === 'assistant_delta')
+    const deltas = onEvent.mock.calls.filter(([e]) => e.kind === 'assistant_text')
     expect(deltas.length).toBeGreaterThan(1)
     const last = deltas[deltas.length - 1]
-    expect(last?.[0]).toEqual({ kind: 'assistant_delta', content: 'Hello, streaming world!' })
+    expect(last?.[0]).toEqual({ kind: 'assistant_text', content: 'Hello, streaming world!' })
   })
 })

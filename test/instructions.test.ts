@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { findGitRoot, loadAgentsMd } from '../src/instructions.js'
+import type { Tool } from '../src/types.js'
 
 const originalHome = process.env.HOME
 let home: string
@@ -94,16 +95,27 @@ describe('loadAgentsMd', () => {
 })
 
 describe('defaultSystemPrompt with agentsMd', () => {
+  const tools: Tool[] = [
+    { name: 'read', description: '', parameters: { type: 'object' }, execute: async () => '' },
+    { name: 'bash', description: '', parameters: { type: 'object' }, execute: async () => '' },
+  ]
+
+  it('lists the provided tool names', async () => {
+    const { defaultSystemPrompt } = await import('../src/config.js')
+    const prompt = defaultSystemPrompt(tools)
+    expect(prompt).toContain('(read, bash)')
+  })
+
   it('includes agentsMd when provided', async () => {
     const { defaultSystemPrompt } = await import('../src/config.js')
-    const prompt = defaultSystemPrompt('custom instructions')
+    const prompt = defaultSystemPrompt(tools, 'custom instructions')
     expect(prompt).toContain('custom instructions')
     expect(prompt).toContain('Mortis')
   })
 
-  it('works without agentsMd', async () => {
+  it('works without tools or agentsMd', async () => {
     const { defaultSystemPrompt } = await import('../src/config.js')
-    const prompt = defaultSystemPrompt()
+    const prompt = defaultSystemPrompt([])
     expect(prompt).toContain('Mortis')
     expect(prompt).not.toContain('<!-- From:')
   })

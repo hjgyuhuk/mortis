@@ -5,7 +5,7 @@
 /** A tool call began. */
 export type AgentEvent =
   | { kind: 'model_request' }
-  | { kind: 'assistant_delta'; content: string }
+  | { kind: 'assistant_text'; content: string }
   | { kind: 'tool_start'; toolCallId: string; toolName: string; argsSummary: string }
   | { kind: 'tool_result'; toolCallId: string; resultSummary: string }
 

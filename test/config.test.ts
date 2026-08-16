@@ -66,6 +66,14 @@ describe('config', () => {
     expect(readFileConfig()).toEqual(config)
   })
 
+  it('does not persist the apiKey when creating the initial config', () => {
+    const config = resolveConfig({ baseUrl: 'http://x/v1', model: 'm', apiKey: 'sk-secret' })
+    ensureFileConfig(config)
+    expect(config.apiKey).toBe('sk-secret')
+    expect(existsSync(configPath())).toBe(true)
+    expect(readFileConfig().apiKey).toBeUndefined()
+  })
+
   it('does not overwrite an existing config file', () => {
     writeFileConfig({ baseUrl: 'http://existing/v1', model: 'existing-model' })
     const config = resolveConfig()

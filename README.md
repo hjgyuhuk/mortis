@@ -22,8 +22,12 @@ src/
 ├── cli.ts             # CLI 入口
 └── index.ts           # 库公共出口
 test/
-├── agent.test.ts      # Agent 循环测试（脚本化 mock provider）
-└── provider.test.ts   # Provider 测试（本地 mock HTTP 服务器）
+├── agent.test.ts         # Agent 循环测试（脚本化 mock provider）
+├── provider.test.ts      # Provider 测试（本地 mock HTTP 服务器）
+├── tools.test.ts         # 内置工具测试（read / write / edit / bash）
+├── tui.test.ts           # TUI 渲染测试
+├── instructions.test.ts  # AGENTS.md 发现与加载测试
+└── config.test.ts        # 配置解析测试
 ```
 
 ## 用法
@@ -50,7 +54,7 @@ pnpm test
 
 ## 配置
 
-配置目录 `~/.mortis`，配置文件 `~/.mortis/config.json`。**首次运行会自动创建目录与配置文件**（写入当前生效配置），无需手动 `--init`。
+配置目录 `~/.mortis`，配置文件 `~/.mortis/config.json`。**首次运行会自动创建目录与配置文件**（只写入 baseUrl 与 model；**apiKey 永不自动落盘**——来自环境变量或 CLI 参数的 key 只在本次运行生效），无需手动 `--init`。
 
 解析优先级：**CLI 参数 > 环境变量 > 配置文件 > 默认值**。
 
@@ -89,14 +93,18 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 `ChatProvider` 是唯一抽象。OpenAI 兼容端点直接可用；其他协议实现 `ChatProvider` 即可接入：
 
 ```ts
-import type { ChatProvider, Message, ModelResponse, Tool } from 'mortis-agent'
+import type { ChatProvider, Message, StreamChunk, Tool } from 'mortis-agent'
 
 class MyProvider implements ChatProvider {
-  async complete(messages: Message[], tools: Tool[]): Promise<ModelResponse> {
-    // 你的协议实现
+  async *completeStream(messages: Message[], tools: Tool[]): AsyncGenerator<StreamChunk> {
+    // 你的协议实现：流式产出 { kind: 'text', delta } 或 { kind: 'tool_calls', tool_calls }
   }
 }
 ```
+
+## 安全边界
+
+Mortis **没有沙箱**。系统提示要求在当前仓库内工作，但 `write` / `edit` / `bash` 接受任意绝对路径、可执行任意 shell 命令，实际不做任何路径或权限限制。只在你信任模型与端点的环境下运行。
 
 ## 核心思想
 

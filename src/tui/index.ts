@@ -47,17 +47,6 @@ const markdownTheme = {
   underline: (text: string) => `\u001b[4m${text}\u001b[0m`,
 }
 
-function summarize(json: string, maxLength = 100): string {
-  if (!json) return ''
-  const singleLine = json.replace(/\s+/g, ' ').trim()
-  return singleLine.length > maxLength ? singleLine.slice(0, maxLength) + '…' : singleLine
-}
-
-function summarizeResult(result: string, maxLength = 160): string {
-  const singleLine = result.replace(/\s+/g, ' ').trim()
-  return singleLine.length > maxLength ? singleLine.slice(0, maxLength) + '…' : singleLine
-}
-
 export class AgentTui {
   private readonly terminal: ProcessTerminal
   private readonly ui: TuiMainScreen
@@ -92,7 +81,7 @@ export class AgentTui {
         this.streamText = null
         this.startLoader('thinking…')
         break
-      case 'assistant_delta':
+      case 'assistant_text':
         if (!this.streamText) {
           this.streamText = new Text('', 1, 0)
           this.answers.addChild(this.streamText)
@@ -102,8 +91,7 @@ export class AgentTui {
         break
       case 'tool_start': {
         this.streamText = null
-        const args = summarize(event.argsSummary)
-        const label = `${event.toolName}${args ? ` ${args}` : ''}`
+        const label = `${event.toolName}${event.argsSummary ? ` ${event.argsSummary}` : ''}`
         const row = new Text(`  ${label}`, 0, 0)
         this.answers.addChild(row)
         this.activeRowText = row
@@ -118,9 +106,8 @@ export class AgentTui {
             this.terminal.columns,
           ))
         }
-        const resultSummary = summarizeResult(event.resultSummary)
-        if (resultSummary) {
-          this.answers.addChild(new Text(`    ${theme.muted(resultSummary)}`, 0, 0))
+        if (event.resultSummary) {
+          this.answers.addChild(new Text(`    ${theme.muted(event.resultSummary)}`, 0, 0))
         }
         this.activeRowText = null
         this.startLoader('thinking…')
@@ -156,9 +143,15 @@ export class AgentTui {
     input.onSubmit = (text: string) => {
       const prompt = text.trim()
       if (!prompt) return
-      input.setValue('')
-      if (running) return
+      if (running) {
+        // A turn is in flight: keep the typed text so it is not lost, and let
+        // the user resubmit once the run finishes.
+        this.startLoader('busy…')
+        return
+      }
       running = true
+
+      input.setValue('')
 
       this.stopLoader()
       this.answers.clear()
@@ -181,18 +174,16 @@ export class AgentTui {
     this.start()
     return new Promise<void>((resolve) => {
       const exit = () => { this.stop(); resolve(); process.exit(0) }
-      this.wireInput(runPrompt)
+      const input = this.wireInput(runPrompt)
 
-      let slashBuffer = ''
       this.ui.addInputListener((data) => {
         if (matchesKey(data, 'ctrl+d')) { exit(); return { consume: true } }
-        if (data === '\r' || data === '\n') {
-          if (slashBuffer.trim() === '/q') { slashBuffer = ''; exit(); return { consume: true } }
-          slashBuffer = ''
-        } else if (data.length === 1 && data >= ' ') {
-          slashBuffer += data
-        } else if (data === '\x7f' || data === '\b') {
-          slashBuffer = slashBuffer.slice(0, -1)
+        // /q is matched against the input's real value, so paste and cursor
+        // movement cannot desynchronize the check. The listener runs before
+        // the focused Input, so consuming Enter keeps /q away from onSubmit.
+        if ((data === '\r' || data === '\n') && input.getValue().trim() === '/q') {
+          exit()
+          return { consume: true }
         }
         return undefined
       })

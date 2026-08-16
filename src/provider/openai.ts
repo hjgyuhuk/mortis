@@ -197,18 +197,19 @@ export class OpenAIProvider implements ChatProvider {
   private readonly apiKey?: string
 
   constructor(options: OpenAIProviderOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/$/, '')
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.model = options.model
     this.apiKey = options.apiKey
   }
 
   async *completeStream(messages: Message[], tools: Tool[]): AsyncGenerator<StreamChunk> {
-    const body = {
+    const body: Record<string, unknown> = {
       model: this.model,
       messages: messages.map(toWireMessage),
-      tools: tools.map(toWireTool),
       stream: true,
     }
+    // OpenAI rejects an empty `tools` array, so only send it when non-empty.
+    if (tools.length > 0) body['tools'] = tools.map(toWireTool)
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`
@@ -229,7 +230,12 @@ export class OpenAIProvider implements ChatProvider {
     if (contentType.toLowerCase().includes('text/event-stream')) {
       let yieldedText = false
       for await (const payload of ssePayloads(response)) {
-        const chunk = JSON.parse(payload) as WireStreamChunk
+        let chunk: WireStreamChunk
+        try {
+          chunk = JSON.parse(payload) as WireStreamChunk
+        } catch {
+          throw new Error(`provider sent invalid SSE JSON: ${payload.slice(0, 200)}`)
+        }
         const delta = chunk.choices?.[0]?.delta
         if (!delta) continue
         if (delta.content) {
@@ -256,11 +262,13 @@ export class OpenAIProvider implements ChatProvider {
     }
     const message = data.choices?.[0]?.message
     if (message?.tool_calls?.length) {
-      for (const call of message.tool_calls) builder.add({
-        index: 0,
-        id: call.id,
-        function: { name: call.function.name, arguments: call.function.arguments },
-      })
+      message.tool_calls.forEach((call, index) =>
+        builder.add({
+          index,
+          id: call.id,
+          function: { name: call.function.name, arguments: call.function.arguments },
+        }),
+      )
       yield { kind: 'tool_calls', tool_calls: builder.build() }
       return
     }

@@ -99,7 +99,7 @@ async function main() {
     const agent = new Agent({
       provider,
       tools: builtinTools,
-      systemPrompt: defaultSystemPrompt(agentsMd),
+      systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
       onEvent: (event) => tui.handle(event),
     })
     await tui.startInteractive((prompt) => agent.run(prompt))
@@ -118,7 +118,7 @@ async function main() {
     const agent = new Agent({
       provider,
       tools: builtinTools,
-      systemPrompt: defaultSystemPrompt(agentsMd),
+      systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
       onEvent: (event) => tui.handle(event),
     })
     try {
@@ -133,7 +133,7 @@ async function main() {
   const agent = new Agent({
     provider,
     tools: builtinTools,
-    systemPrompt: defaultSystemPrompt(agentsMd),
+    systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
   })
   console.log(`mortis: talking to ${config.model} @ ${config.baseUrl}`)
   const answer = await agent.run(prompt)

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Markdown } from '@earendil-works/pi-tui'
 import { AgentTui } from '../src/tui/index.js'
 
 /** Render the TUI component tree at a fixed width without starting the terminal. */
@@ -44,7 +45,6 @@ describe('AgentTui rendering', () => {
     const tui = new AgentTui('m', 'http://x/v1')
     tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{}' })
     tui.handle({ kind: 'tool_result', toolCallId: 'c1', resultSummary: '"ok"' })
-    const { Markdown } = require('@earendil-works/pi-tui')
     const md = new Markdown('# Hello **world**', 0, 0, {
       heading: (t: string) => `H:${t}`,
       bold: (t: string) => `B:${t}`,
