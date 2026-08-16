@@ -19,6 +19,12 @@ class ScriptedProvider implements ChatProvider {
       }
       return
     }
+    if (next.kind === 'thinking') {
+      for (const part of splitIntoDeltas(next.content)) {
+        yield { kind: 'thinking', delta: part }
+      }
+      return
+    }
     yield { kind: 'tool_calls', tool_calls: next.tool_calls }
   }
 }
@@ -174,6 +180,32 @@ describe('Agent loop', () => {
     expect(deltas.length).toBeGreaterThan(1)
     const last = deltas[deltas.length - 1]
     expect(last?.[0]).toEqual({ kind: 'assistant_text', content: 'Hello, streaming world!' })
+  })
+
+  it('emits cumulative thinking events without persisting reasoning', async () => {
+    const provider: ChatProvider = {
+      async *completeStream() {
+        yield { kind: 'thinking', delta: 'think ' }
+        yield { kind: 'thinking', delta: 'hard' }
+        yield { kind: 'text', delta: 'answer' }
+      },
+    }
+    const onEvent = vi.fn()
+    const agent = new Agent({ provider, tools: [], systemPrompt: 'sys', onEvent })
+
+    const result = await agent.run('q')
+
+    expect(result).toBe('answer')
+    const thinkingEvents = onEvent.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.kind === 'assistant_thinking')
+    expect(thinkingEvents.map((event) => (event.kind === 'assistant_thinking' ? event.content : ''))).toEqual([
+      'think ',
+      'think hard',
+    ])
+    // Reasoning is display-only: it never enters the state.
+    expect(JSON.stringify(agent.snapshot.messages)).not.toContain('think')
+    expect(agent.snapshot.messages.at(-1)).toEqual({ role: 'assistant', content: 'answer' })
   })
 
   it('aborts an in-flight model request and stays resumable', async () => {

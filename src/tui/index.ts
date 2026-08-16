@@ -44,6 +44,7 @@ const theme = {
   bold: (text: string) => `\u001b[1m${text}\u001b[0m`,
   error: (text: string) => `\u001b[31m${text}\u001b[0m`,
   yellow: (text: string) => `\u001b[33m${text}\u001b[0m`,
+  thinking: (text: string) => `\u001b[2;3m${text}\u001b[0m`,
 }
 
 const markdownTheme = {
@@ -67,6 +68,18 @@ const markdownTheme = {
 function summarizeResult(content: string, maxLength = 160): string {
   const singleLine = content.replace(/\s+/g, ' ').trim()
   return singleLine.length > maxLength ? singleLine.slice(0, maxLength) + '…' : singleLine
+}
+
+/** Clip thinking text to its last non-empty lines, tail-truncating long ones. */
+function clipThinking(content: string, maxWidth: number, maxLines = 2): string {
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+  return lines
+    .slice(-maxLines)
+    .map((line) => (line.length > maxWidth ? `…${line.slice(-(maxWidth - 1))}` : line))
+    .join('\n')
 }
 
 export interface AgentTuiOptions {
@@ -128,6 +141,9 @@ export class AgentTui {
   private readonly loader: Loader
   /** Container the loader is attached to while a run is in flight. */
   private readonly loaderHost: Container
+  /** Live thinking preview (bottom area); renders zero lines when empty. */
+  private readonly thinkingPreview = new Text('', 1, 0)
+  private pendingThinking = ''
   private readonly editor?: Editor
   /** Tool rows in flight, keyed by tool call id (parallel tools interleave). */
   private readonly rows = new Map<string, ToolRow>()
@@ -166,6 +182,7 @@ export class AgentTui {
       this.editor = editor
       const bottom = new Container()
       bottom.addChild(statusRow)
+      bottom.addChild(this.thinkingPreview)
       bottom.addChild(new FramedEditor(editor, theme.muted))
       ui.setLayoutRoot(
         new VStack([
@@ -184,6 +201,7 @@ export class AgentTui {
       const column = new Container()
       column.addChild(header)
       column.addChild(this.answers)
+      column.addChild(this.thinkingPreview)
       this.loaderHost = column
       ui.addChild(column)
     }
@@ -198,9 +216,18 @@ export class AgentTui {
     switch (event.kind) {
       case 'model_request':
         this.streamText = null
+        this.pendingThinking = ''
+        this.thinkingPreview.setText('')
         this.startLoader('thinking…')
         break
+      case 'assistant_thinking':
+        // Live preview under the loader, above the input: last two lines.
+        this.pendingThinking = event.content
+        this.thinkingPreview.setText(theme.thinking(clipThinking(event.content, this.clipWidth())))
+        this.startLoader('reasoning…')
+        break
       case 'assistant_text':
+        this.commitThinking()
         if (!this.streamText) {
           this.streamText = new Text('', 1, 0)
           this.answers.addChild(this.streamText)
@@ -209,6 +236,7 @@ export class AgentTui {
         this.streamText.setText(event.content)
         break
       case 'tool_start': {
+        this.commitThinking()
         this.streamText = null
         const label = `${event.toolName}${event.argsSummary ? ` ${event.argsSummary}` : ''}`
         const row = new Text(`  ${label}`, 0, 0)
@@ -233,6 +261,7 @@ export class AgentTui {
         break
       }
       case 'run_interrupted':
+        this.commitThinking()
         this.streamText = null
         this.rows.clear()
         this.answers.addChild(new Text(theme.muted(`(interrupted: ${event.reason})`), 1, 0))
@@ -242,7 +271,26 @@ export class AgentTui {
     this.ui.requestRender()
   }
 
+  /**
+   * Move the streamed thinking into the transcript as a gray two-line block
+   * and collapse the live preview. Called when thinking ends (first answer
+   * text, tool start, interruption, or finalization).
+   */
+  private commitThinking(): void {
+    const content = this.pendingThinking
+    this.pendingThinking = ''
+    this.thinkingPreview.setText('')
+    if (!content.trim()) return
+    this.answers.addChild(new Text(theme.muted('✻ thinking'), 1, 0))
+    this.answers.addChild(new Text(theme.thinking(clipThinking(content, this.clipWidth())), 1, 1))
+  }
+
+  private clipWidth(): number {
+    return Math.max(10, (this.terminal.columns || 80) - 4)
+  }
+
   private finalizeAnswer(answer: string): void {
+    this.commitThinking()
     if (this.streamText) {
       this.answers.removeChild(this.streamText)
       this.streamText = null
@@ -280,6 +328,8 @@ export class AgentTui {
       editor.addToHistory(prompt)
 
       this.streamText = null
+      this.pendingThinking = ''
+      this.thinkingPreview.setText('')
       this.rows.clear()
       this.answers.addChild(new Text(theme.bold(theme.yellow(`> ${prompt}`)), 1, 0))
       this.ui.requestRender()
@@ -289,6 +339,7 @@ export class AgentTui {
         .catch((error: unknown) => {
           // Interruption is already shown via the run_interrupted event.
           if (error instanceof RunInterruptedError) return
+          this.commitThinking()
           this.answers.addChild(new Text(theme.error(`error: ${(error as Error).message}`), 1, 1))
           this.stopLoader()
         })

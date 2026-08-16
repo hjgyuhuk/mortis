@@ -24,6 +24,7 @@ function parseCliArgs(argv: string[]) {
       'base-url': { type: 'string' } as const,
       model: { type: 'string' } as const,
       'api-key': { type: 'string' } as const,
+      'thinking-effort': { type: 'string' } as const,
       cwd: { type: 'string' } as const,
       help: { type: 'boolean', short: 'h' } as const,
       init: { type: 'boolean' } as const,
@@ -52,6 +53,7 @@ function usage(): string {
     '  --base-url <url>   OpenAI-compatible base URL (env: MORTIS_BASE_URL)',
     '  --model <name>     Model name (env: MORTIS_MODEL)',
     '  --api-key <key>    API key (env: MORTIS_API_KEY)',
+    "  --thinking-effort <level>  Reasoning effort, sent as thinking_effort (env: MORTIS_THINKING_EFFORT)",
     '  --cwd <path>       Working directory for the agent',
     '  --plain            Disable the terminal UI (no animations)',
     '  --continue         Resume the latest saved session (~/.mortis/sessions/latest.json)',
@@ -77,6 +79,7 @@ async function main() {
       baseUrl: values['base-url'] ?? process.env.MORTIS_BASE_URL,
       model: values.model ?? process.env.MORTIS_MODEL,
       apiKey: values['api-key'] ?? process.env.MORTIS_API_KEY,
+      thinkingEffort: values['thinking-effort'] ?? process.env.MORTIS_THINKING_EFFORT,
     }
     writeFileConfig(
       Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)) as Partial<Config>,
@@ -89,6 +92,7 @@ async function main() {
     baseUrl: values['base-url'],
     model: values.model,
     apiKey: values['api-key'],
+    thinkingEffort: values['thinking-effort'],
   })
   ensureFileConfig(config)
   const provider = new OpenAIProvider(config)

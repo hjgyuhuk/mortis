@@ -10,6 +10,8 @@
 /** A tool call began. */
 export type AgentEvent =
   | { kind: 'model_request' }
+  /** Accumulated model reasoning so far, streamed before the answer. */
+  | { kind: 'assistant_thinking'; content: string }
   /** Accumulated assistant text so far, as it streams in. */
   | { kind: 'assistant_text'; content: string }
   | { kind: 'tool_start'; toolCallId: string; toolName: string; argsSummary: string }

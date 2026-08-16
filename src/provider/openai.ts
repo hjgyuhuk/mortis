@@ -19,6 +19,8 @@ export interface OpenAIProviderOptions {
   model: string
   /** API key; optional for local servers that do not require one. */
   apiKey?: string
+  /** Reasoning effort sent as `thinking_effort` when set (e.g. 'low' | 'medium' | 'high'). */
+  thinkingEffort?: string
 }
 
 interface WireMessage {
@@ -53,7 +55,16 @@ interface WireStreamChunk {
   choices?: Array<{
     delta?: {
       content?: string | null
+      /** DeepSeek-R1 style reasoning stream, adopted by many gateways. */
+      reasoning_content?: string | null
+      /** OpenRouter style alias for the same. */
+      reasoning?: string | null
       tool_calls?: WireChunkToolCall[]
+    }
+    message?: {
+      content?: string | null
+      reasoning_content?: string | null
+      tool_calls?: WireToolCall[]
     }
   }>
 }
@@ -195,11 +206,13 @@ export class OpenAIProvider implements ChatProvider {
   private readonly baseUrl: string
   private readonly model: string
   private readonly apiKey?: string
+  private readonly thinkingEffort?: string
 
   constructor(options: OpenAIProviderOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.model = options.model
     this.apiKey = options.apiKey
+    this.thinkingEffort = options.thinkingEffort
   }
 
   async *completeStream(messages: Message[], tools: Tool[], signal?: AbortSignal): AsyncGenerator<StreamChunk> {
@@ -210,6 +223,7 @@ export class OpenAIProvider implements ChatProvider {
     }
     // OpenAI rejects an empty `tools` array, so only send it when non-empty.
     if (tools.length > 0) body['tools'] = tools.map(toWireTool)
+    if (this.thinkingEffort) body['thinking_effort'] = this.thinkingEffort
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`
@@ -240,6 +254,10 @@ export class OpenAIProvider implements ChatProvider {
         }
         const delta = chunk.choices?.[0]?.delta
         if (!delta) continue
+        const reasoning = delta.reasoning_content ?? delta.reasoning
+        if (reasoning) {
+          yield { kind: 'thinking', delta: reasoning }
+        }
         if (delta.content) {
           yieldedText = true
           yield { kind: 'text', delta: delta.content }
@@ -260,9 +278,12 @@ export class OpenAIProvider implements ChatProvider {
     // Non-SSE endpoint (e.g. a gateway that ignores `stream: true`): read the
     // whole JSON and translate one message as a single chunk.
     const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string | null; tool_calls?: WireToolCall[] } }>
+      choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null; tool_calls?: WireToolCall[] } }>
     }
     const message = data.choices?.[0]?.message
+    if (message?.reasoning_content) {
+      yield { kind: 'thinking', delta: message.reasoning_content }
+    }
     if (message?.tool_calls?.length) {
       message.tool_calls.forEach((call, index) =>
         builder.add({

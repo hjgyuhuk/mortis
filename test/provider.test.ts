@@ -233,6 +233,75 @@ describe('OpenAIProvider', () => {
     expect(requests[0]).not.toHaveProperty('tools')
   })
 
+  it('streams reasoning_content deltas as thinking chunks before text', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.end(sse([
+        { choices: [{ delta: { reasoning_content: 'th' } }] },
+        { choices: [{ delta: { reasoning_content: 'ink' } }] },
+        { choices: [{ delta: { content: 'ans' } }] },
+      ]))
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(chunks).toEqual([
+      { kind: 'thinking', delta: 'th' },
+      { kind: 'thinking', delta: 'ink' },
+      { kind: 'text', delta: 'ans' },
+    ])
+  })
+
+  it('accepts the reasoning field as an alias for reasoning_content', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.end(sse([
+        { choices: [{ delta: { reasoning: 'th' } }] },
+        { choices: [{ delta: { content: 'ans' } }] },
+      ]))
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+    expect(chunks[0]).toEqual({ kind: 'thinking', delta: 'th' })
+  })
+
+  it('sends thinking_effort only when configured', async () => {
+    const requests: Array<Record<string, unknown>> = []
+    const { url } = await openServer((req, res) => {
+      let body = ''
+      req.on('data', (chunk) => (body += chunk))
+      req.on('end', () => {
+        requests.push(body ? JSON.parse(body) : null)
+        res.setHeader('Content-Type', 'text/event-stream')
+        res.end(sse([{ choices: [{ delta: { content: 'ok' } }] }]))
+      })
+    })
+
+    await collect(new OpenAIProvider({ baseUrl: url, model: 'm', thinkingEffort: 'high' }).completeStream([{ role: 'user', content: 'hi' }], []))
+    await collect(new OpenAIProvider({ baseUrl: url, model: 'm' }).completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(requests[0]).toMatchObject({ thinking_effort: 'high' })
+    expect(requests[1]).not.toHaveProperty('thinking_effort')
+  })
+
+  it('translates reasoning in a non-SSE JSON response', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({
+        choices: [{ message: { content: 'plain reply', reasoning_content: 'because' } }],
+      }))
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+    expect(chunks).toEqual([
+      { kind: 'thinking', delta: 'because' },
+      { kind: 'text', delta: 'plain reply' },
+    ])
+  })
+
   it('throws a readable error on non-200 responses', async () => {
     const { url } = await openServer((_req, res) => {
       res.statusCode = 401

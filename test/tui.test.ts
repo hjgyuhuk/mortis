@@ -61,6 +61,38 @@ describe('AgentTui rendering', () => {
     expect(lines.some((l) => l.includes('(interrupted: user interrupt)'))).toBe(true)
   })
 
+  it('previews thinking live, then commits a two-line gray block to the transcript', () => {
+    const tui = new AgentTui('m', 'http://x/v1')
+    tui.handle({ kind: 'model_request' })
+    tui.handle({ kind: 'assistant_thinking', content: 'line one\nline two\nline three' })
+
+    // While streaming: tail preview only, nothing committed yet.
+    let lines = render(tui)
+    expect(lines.some((l) => l.includes('line three'))).toBe(true)
+    expect(lines.some((l) => l.includes('✻ thinking'))).toBe(false)
+
+    tui.handle({ kind: 'assistant_text', content: 'answer' })
+
+    // After thinking ends: gray block in the transcript, clipped to the last
+    // two non-empty lines; the preview is gone.
+    lines = render(tui)
+    expect(lines.some((l) => l.includes('✻ thinking'))).toBe(true)
+    expect(lines.some((l) => l.includes('line two'))).toBe(true)
+    expect(lines.some((l) => l.includes('line three'))).toBe(true)
+    expect(lines.filter((l) => l.includes('line ')).length).toBe(2)
+  })
+
+  it('shows the live thinking preview above the input box', () => {
+    const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
+    tui.handle({ kind: 'model_request' })
+    tui.handle({ kind: 'assistant_thinking', content: 'reasoning tail' })
+    const lines = render(tui)
+    const previewIndex = lines.findIndex((l) => l.includes('reasoning tail'))
+    const editorIndex = lines.findIndex((l) => l.includes('╭'))
+    expect(previewIndex).toBeGreaterThanOrEqual(0)
+    expect(editorIndex).toBeGreaterThan(previewIndex)
+  })
+
   it('renders markdown answer text', () => {
     const tui = new AgentTui('m', 'http://x/v1')
     tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{}' })

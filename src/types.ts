@@ -62,11 +62,14 @@ export type Decision =
 /** A single model response, either text or tool calls. */
 export type ModelResponse =
   | { kind: 'text'; content: string }
+  | { kind: 'thinking'; content: string }
   | { kind: 'tool_calls'; tool_calls: ToolCall[] }
 
 /** One chunk of a streamed model response. */
 export type StreamChunk =
   | { kind: 'text'; delta: string }
+  /** Model reasoning (e.g. `reasoning_content` deltas); display-only. */
+  | { kind: 'thinking'; delta: string }
   | { kind: 'tool_calls'; tool_calls: ToolCall[] }
 
 /** The provider abstraction — one method, the streamed chat completion. */

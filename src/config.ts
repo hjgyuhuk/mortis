@@ -15,6 +15,8 @@ export interface Config {
   model: string
   /** Optional API key. */
   apiKey?: string
+  /** Optional reasoning effort, sent as `thinking_effort` (e.g. 'low' | 'medium' | 'high'). */
+  thinkingEffort?: string
 }
 
 /** Path to the configuration directory. */
@@ -36,7 +38,7 @@ export function readFileConfig(): Partial<Config> {
   if (!existsSync(path)) return {}
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>
-    return { baseUrl: parsed.baseUrl, model: parsed.model, apiKey: parsed.apiKey }
+    return { baseUrl: parsed.baseUrl, model: parsed.model, apiKey: parsed.apiKey, thinkingEffort: parsed.thinkingEffort }
   } catch (error) {
     throw new Error(`invalid config at ${path}: ${(error as Error).message}`)
   }
@@ -73,7 +75,8 @@ export function resolveConfig(overrides: Partial<Config> = {}): Config {
   const baseUrl = overrides.baseUrl ?? process.env.MORTIS_BASE_URL ?? file.baseUrl ?? 'https://api.openai.com/v1'
   const model = overrides.model ?? process.env.MORTIS_MODEL ?? file.model ?? 'gpt-4o-mini'
   const apiKey = overrides.apiKey ?? process.env.MORTIS_API_KEY ?? file.apiKey
-  return { baseUrl, model, apiKey }
+  const thinkingEffort = overrides.thinkingEffort ?? process.env.MORTIS_THINKING_EFFORT ?? file.thinkingEffort
+  return { baseUrl, model, apiKey, thinkingEffort }
 }
 
 /** Default system prompt describing the agent's tools and behavior. */

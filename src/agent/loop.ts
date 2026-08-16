@@ -136,11 +136,17 @@ export class Agent {
   private async think(scope: Scope): Promise<Decision> {
     const messages: Message[] = [...this.state.messages]
     let content = ''
+    let thinking = ''
     let toolCalls: ToolCall[] = []
     for await (const chunk of this.provider.completeStream(messages, this.tools, scope.signal)) {
       if (chunk.kind === 'text') {
         content += chunk.delta
         this.onEvent?.({ kind: 'assistant_text', content })
+      } else if (chunk.kind === 'thinking') {
+        // Reasoning is display-only: the wire format forbids sending it back
+        // and a resume does not need it, so it never enters the state.
+        thinking += chunk.delta
+        this.onEvent?.({ kind: 'assistant_thinking', content: thinking })
       } else {
         toolCalls = chunk.tool_calls
       }

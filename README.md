@@ -78,6 +78,7 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 | Base URL | `--base-url` | `MORTIS_BASE_URL` | `https://api.openai.com/v1` |
 | 模型 | `--model` | `MORTIS_MODEL` | `gpt-4o-mini` |
 | API Key | `--api-key` | `MORTIS_API_KEY` | 无 |
+| 思考强度 | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | 不发送 |
 | TUI | `--plain` 禁用 | — | TTY 下启用 |
 
 ## 终端 UI
@@ -86,6 +87,7 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 
 - 无 prompt 参数时**直接进入交互模式**（备用屏幕聊天布局）：**多行输入框**，Enter 提交、Shift+Enter 换行（不支持 Shift+Enter 的终端用行尾 `\`+Enter），↑/↓ 翻提交历史，`/q` 或 Ctrl+D 退出，**多轮答案累积**在滚动 transcript 里
 - **Ctrl+C 中断运行中的回合**：取消在飞的模型请求和 shell 命令，会话保留、可继续提问；空闲时按 Ctrl+C 直接退出
+- **思考过程呈现**：模型返回的 reasoning（`reasoning_content` / `reasoning` 流）以 `✻ thinking` 暗色斜体块流式显示在答案上方，回看 transcript 时保留；配置 `--thinking-effort` 可控制思考强度（作为 `thinking_effort` 发送）
 - transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
 - 同一轮的多个工具调用**并发执行**，结果按声明顺序提交；工具行各自显示 ✓ / ✗
 - 带 prompt 参数的单次运行用主屏流式渲染：每轮工具调用一行，完成后 ✓ 与结果摘要，最终答案按 markdown 渲染

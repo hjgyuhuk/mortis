@@ -18,14 +18,26 @@ afterEach(() => {
   delete process.env.MORTIS_BASE_URL
   delete process.env.MORTIS_MODEL
   delete process.env.MORTIS_API_KEY
+  delete process.env.MORTIS_THINKING_EFFORT
 })
 
 describe('config', () => {
+  it('resolves thinkingEffort with CLI > env > file precedence', () => {
+    writeFileConfig({ baseUrl: 'http://x/v1', model: 'm', thinkingEffort: 'low' })
+    expect(resolveConfig().thinkingEffort).toBe('low')
+
+    process.env.MORTIS_THINKING_EFFORT = 'high'
+    expect(resolveConfig().thinkingEffort).toBe('high')
+
+    expect(resolveConfig({ thinkingEffort: 'medium' }).thinkingEffort).toBe('medium')
+  })
+
   it('reads defaults when no config file exists', () => {
     const config = resolveConfig()
     expect(config.baseUrl).toBe('https://api.openai.com/v1')
     expect(config.model).toBe('gpt-4o-mini')
     expect(config.apiKey).toBeUndefined()
+    expect(config.thinkingEffort).toBeUndefined()
   })
 
   it('reads from ~/.mortis/config.json', () => {
