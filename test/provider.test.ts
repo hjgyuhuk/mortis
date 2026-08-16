@@ -242,4 +242,19 @@ describe('OpenAIProvider', () => {
     const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
     await expect(collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))).rejects.toThrow('provider request failed (401): bad key')
   })
+
+  it('cancels a stalled SSE stream through the signal', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.write(sse([{ choices: [{ delta: { content: 'par' } }] }]))
+      // Stall: the stream stays open and never sends more data.
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const controller = new AbortController()
+    const pending = collect(provider.completeStream([{ role: 'user', content: 'hi' }], [], controller.signal))
+    setTimeout(() => controller.abort(), 50)
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  }, 5000)
 })

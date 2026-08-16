@@ -41,15 +41,30 @@ describe('AgentTui rendering', () => {
   it('shows check mark after tool_result event', () => {
     const tui = new AgentTui('m', 'http://x/v1')
     tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{"command":"ls"}' })
-    tui.handle({ kind: 'tool_result', toolCallId: 'c1', resultSummary: '"ok"' })
+    tui.handle({ kind: 'tool_result', toolCallId: 'c1', content: 'ok', isError: false })
     const lines = render(tui)
     expect(lines.some((l) => l.includes('✓'))).toBe(true)
+  })
+
+  it('marks failed tools with a cross', () => {
+    const tui = new AgentTui('m', 'http://x/v1')
+    tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{}' })
+    tui.handle({ kind: 'tool_result', toolCallId: 'c1', content: 'error: boom', isError: true })
+    const lines = render(tui)
+    expect(lines.some((l) => l.includes('✗'))).toBe(true)
+  })
+
+  it('renders an interrupted notice from the run_interrupted event', () => {
+    const tui = new AgentTui('m', 'http://x/v1')
+    tui.handle({ kind: 'run_interrupted', reason: 'user interrupt' })
+    const lines = render(tui)
+    expect(lines.some((l) => l.includes('(interrupted: user interrupt)'))).toBe(true)
   })
 
   it('renders markdown answer text', () => {
     const tui = new AgentTui('m', 'http://x/v1')
     tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{}' })
-    tui.handle({ kind: 'tool_result', toolCallId: 'c1', resultSummary: '"ok"' })
+    tui.handle({ kind: 'tool_result', toolCallId: 'c1', content: 'ok', isError: false })
     const md = new Markdown('# Hello **world**', 0, 0, {
       heading: (t: string) => `H:${t}`,
       bold: (t: string) => `B:${t}`,
@@ -66,19 +81,20 @@ describe('AgentTui rendering', () => {
 })
 
 describe('AgentTui interactive', () => {
-  it('renders the chat layout with header and a boxed input', () => {
+  it('renders the chat layout with header and a closed editor frame', () => {
     const lines = render(new AgentTui('my-model', 'http://x/v1', { interactive: true }))
     expect(lines.some((l) => l.includes('mortis — my-model'))).toBe(true)
+    // The editor's borders are closed by FramedEditor: corners + side bars.
     expect(lines.some((l) => l.includes('╭'))).toBe(true)
-    expect(lines.some((l) => l.includes('│'))).toBe(true)
     expect(lines.some((l) => l.includes('╰'))).toBe(true)
+    expect(lines.some((l) => l.includes('│'))).toBe(true)
   })
 
   it('renders tool rows in the interactive transcript', () => {
     const tui = new AgentTui('m', 'http://x/v1', { interactive: true })
     tui.handle({ kind: 'model_request' })
     tui.handle({ kind: 'tool_start', toolCallId: 'c1', toolName: 'bash', argsSummary: '{"command":"ls"}' })
-    tui.handle({ kind: 'tool_result', toolCallId: 'c1', resultSummary: '"ok"' })
+    tui.handle({ kind: 'tool_result', toolCallId: 'c1', content: 'ok', isError: false })
     const lines = render(tui)
     expect(lines.some((l) => l.includes('bash'))).toBe(true)
     expect(lines.some((l) => l.includes('✓'))).toBe(true)

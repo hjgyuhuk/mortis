@@ -9,16 +9,20 @@
  *   Ctrl+Shift+F to search), and the input pinned at the bottom. Answers
  *   accumulate across turns; on exit the whole transcript is printed back
  *   into the terminal's main buffer.
+ *
+ * The TUI only observes domain events and derives all display concerns
+ * (spinner text, truncation, markdown) from them.
  */
 
 import {
   Container,
-  Input,
+  Editor,
   Loader,
   Markdown,
   matchesKey,
   ProcessTerminal,
   ScrollView,
+  stripTerminalSequences,
   Text,
   truncateToWidth,
   TuiAltScreen,
@@ -29,6 +33,7 @@ import {
 } from '@earendil-works/pi-tui'
 
 import type { AgentEvent } from '../agent/events.js'
+import { RunInterruptedError } from '../agent/loop.js'
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
@@ -58,49 +63,62 @@ const markdownTheme = {
   underline: (text: string) => `\u001b[4m${text}\u001b[0m`,
 }
 
+/** UI-side display truncation; domain events carry full content. */
+function summarizeResult(content: string, maxLength = 160): string {
+  const singleLine = content.replace(/\s+/g, ' ').trim()
+  return singleLine.length > maxLength ? singleLine.slice(0, maxLength) + '…' : singleLine
+}
+
 export interface AgentTuiOptions {
   /** Interactive chat layout: alt screen, scrolling transcript, input box. */
   interactive?: boolean
+  /** Mark the session as restored (header suffix). */
+  resumed?: boolean
 }
 
-/** Strip pi-tui Input's hardcoded "> " prompt so the box shows bare text. */
-class BareInput implements Component {
-  constructor(private readonly input: Input) {}
-
-  invalidate(): void {
-    this.input.invalidate()
-  }
-
-  render(width: number): string[] {
-    return this.input.render(width + 2).map((line) => (line.startsWith('> ') ? line.slice(2) : line))
-  }
-}
-
-/** Wrap a component in a rounded box frame (e.g. the chat input). */
-class BorderedBox implements Component {
+/**
+ * Close the editor's open top/bottom borders with side bars and rounded
+ * corners. Rendering only — focus and input go to the wrapped editor.
+ */
+class FramedEditor implements Component {
   constructor(
-    private readonly child: Component,
-    private readonly frame: (text: string) => string = (text) => text,
+    private readonly editor: Editor,
+    private readonly frame: (text: string) => string,
   ) {}
 
   invalidate(): void {
-    this.child.invalidate?.()
+    this.editor.invalidate()
   }
 
   render(width: number): string[] {
     const innerWidth = Math.max(1, width - 4)
-    const content = this.child.render(innerWidth).map((line) => {
+    const lines = this.editor.render(innerWidth)
+    return lines.map((line, index) => {
+      const isFirst = index === 0
+      const isLast = index === lines.length - 1
+      if (isFirst || isLast) {
+        const open = this.frame(isFirst ? '╭' : '╰')
+        const close = this.frame(isFirst ? '╮' : '╯')
+        const visible = stripTerminalSequences(line)
+        if (/^─+$/.test(visible)) {
+          return open + this.frame('─'.repeat(Math.max(0, width - 2))) + close
+        }
+        // Scroll-indicator border (e.g. "─── ↑ 3 more ───"): keep the info,
+        // pad to fit between the corners.
+        return open + truncateToWidth(line, Math.max(1, width - 2), undefined, true) + close
+      }
       const clipped = visibleWidth(line) > innerWidth ? truncateToWidth(line, innerWidth) : line
       const padding = ' '.repeat(Math.max(0, innerWidth - visibleWidth(clipped)))
       return `${this.frame('│')} ${clipped}${padding} ${this.frame('│')}`
     })
-    const horizontal = '─'.repeat(Math.max(0, width - 2))
-    return [
-      this.frame(`╭${horizontal}╮`),
-      ...content,
-      this.frame(`╰${horizontal}╯`),
-    ]
   }
+}
+
+/** One tool's transcript row plus its reserved result-summary line. */
+interface ToolRow {
+  row: Text
+  summary: Text
+  label: string
 }
 
 export class AgentTui {
@@ -110,17 +128,19 @@ export class AgentTui {
   private readonly loader: Loader
   /** Container the loader is attached to while a run is in flight. */
   private readonly loaderHost: Container
-  private readonly input?: Input
+  private readonly editor?: Editor
+  /** Tool rows in flight, keyed by tool call id (parallel tools interleave). */
+  private readonly rows = new Map<string, ToolRow>()
   private loaderActive = false
-  private activeRowText: Text | null = null
-  private activeRowLabel = ''
   private streamText: Text | null = null
   private started = false
+  private busy = false
 
   constructor(model: string, baseUrl: string, options: AgentTuiOptions = {}) {
     const showHardwareCursor = process.env['PI_HARDWARE_CURSOR'] === '1'
     this.terminal = new ProcessTerminal()
-    const header = new Text(theme.bold(`mortis — ${model} @ ${baseUrl}`), 0, 0)
+    const title = `mortis — ${model} @ ${baseUrl}${options.resumed ? ' (resumed)' : ''}`
+    const header = new Text(theme.bold(title), 0, 0)
 
     if (options.interactive) {
       const ui = new TuiAltScreen(this.terminal, showHardwareCursor || undefined)
@@ -130,11 +150,23 @@ export class AgentTui {
       // the loader is detached and the layout stays stable while it spins.
       const statusRow = new Container()
       this.loaderHost = statusRow
-      const input = new Input()
-      this.input = input
+      // Multi-line editor: Enter submits, Shift+Enter (or "\"+Enter) breaks
+      // the line, up/down recalls history; it renders its own box frame and
+      // scrolls once the text exceeds ~30% of the terminal height.
+      const editor = new Editor(ui, {
+        borderColor: theme.muted,
+        selectList: {
+          selectedPrefix: theme.primary,
+          selectedText: theme.bold,
+          description: theme.muted,
+          scrollInfo: theme.muted,
+          noMatch: theme.muted,
+        },
+      })
+      this.editor = editor
       const bottom = new Container()
       bottom.addChild(statusRow)
-      bottom.addChild(new BorderedBox(new BareInput(input), theme.muted))
+      bottom.addChild(new FramedEditor(editor, theme.muted))
       ui.setLayoutRoot(
         new VStack([
           { component: header, basis: 'auto', shrink: 0, minSize: 1 },
@@ -165,7 +197,6 @@ export class AgentTui {
   handle(event: AgentEvent): void {
     switch (event.kind) {
       case 'model_request':
-        this.activeRowText = null
         this.streamText = null
         this.startLoader('thinking…')
         break
@@ -181,26 +212,32 @@ export class AgentTui {
         this.streamText = null
         const label = `${event.toolName}${event.argsSummary ? ` ${event.argsSummary}` : ''}`
         const row = new Text(`  ${label}`, 0, 0)
+        const summary = new Text('', 0, 0)
         this.answers.addChild(row)
-        this.activeRowText = row
-        this.activeRowLabel = label
+        this.answers.addChild(summary)
+        this.rows.set(event.toolCallId, { row, summary, label })
         this.startLoader(label)
         break
       }
       case 'tool_result': {
-        if (this.activeRowText) {
-          this.activeRowText.setText(truncateToWidth(
-            `${theme.ok('✓')} ${this.activeRowLabel}`,
-            this.terminal.columns,
-          ))
+        const entry = this.rows.get(event.toolCallId)
+        if (entry) {
+          const mark = event.isError ? theme.error('✗') : theme.ok('✓')
+          entry.row.setText(truncateToWidth(`${mark} ${entry.label}`, this.terminal.columns))
+          if (event.content) {
+            entry.summary.setText(`    ${theme.muted(summarizeResult(event.content))}`)
+          }
+          this.rows.delete(event.toolCallId)
         }
-        if (event.resultSummary) {
-          this.answers.addChild(new Text(`    ${theme.muted(event.resultSummary)}`, 0, 0))
-        }
-        this.activeRowText = null
-        this.startLoader('thinking…')
+        if (this.rows.size === 0) this.startLoader('thinking…')
         break
       }
+      case 'run_interrupted':
+        this.streamText = null
+        this.rows.clear()
+        this.answers.addChild(new Text(theme.muted(`(interrupted: ${event.reason})`), 1, 0))
+        this.stopLoader()
+        break
     }
     this.ui.requestRender()
   }
@@ -222,54 +259,65 @@ export class AgentTui {
     this.stop()
   }
 
-  private wireInput(runPrompt: (prompt: string) => Promise<string>): Input {
-    const input = this.input
-    if (!input) throw new Error('wireInput requires the interactive layout')
+  private wireInput(runPrompt: (prompt: string) => Promise<string>): Editor {
+    const editor = this.editor
+    if (!editor) throw new Error('wireInput requires the interactive layout')
 
-    this.ui.setFocus(input)
+    this.ui.setFocus(editor)
 
-    let running = false
-    input.onSubmit = (text: string) => {
+    editor.onSubmit = (text: string) => {
       const prompt = text.trim()
       if (!prompt) return
-      if (running) {
-        // A turn is in flight: keep the typed text so it is not lost, and let
-        // the user resubmit once the run finishes.
+      if (this.busy) {
+        // The editor already cleared itself on submit; restore the text so it
+        // is not lost and can be resubmitted once the run finishes.
+        editor.setText(prompt)
         this.startLoader('busy…')
         return
       }
-      running = true
+      this.busy = true
 
-      input.setValue('')
+      editor.addToHistory(prompt)
 
-      this.activeRowText = null
       this.streamText = null
+      this.rows.clear()
       this.answers.addChild(new Text(theme.bold(theme.yellow(`> ${prompt}`)), 1, 0))
       this.ui.requestRender()
 
       void runPrompt(prompt)
         .then((answer) => { this.finalizeAnswer(answer) })
         .catch((error: unknown) => {
+          // Interruption is already shown via the run_interrupted event.
+          if (error instanceof RunInterruptedError) return
           this.answers.addChild(new Text(theme.error(`error: ${(error as Error).message}`), 1, 1))
           this.stopLoader()
         })
-        .finally(() => { running = false; this.ui.requestRender() })
+        .finally(() => { this.busy = false; this.ui.requestRender() })
     }
-    return input
+    return editor
   }
 
-  async startInteractive(runPrompt: (prompt: string) => Promise<string>): Promise<void> {
+  async startInteractive(
+    runPrompt: (prompt: string) => Promise<string>,
+    options: { onInterrupt?: () => void } = {},
+  ): Promise<void> {
     this.start()
     return new Promise<void>((resolve) => {
       const exit = () => { this.stop(); resolve(); process.exit(0) }
       const input = this.wireInput(runPrompt)
 
       this.ui.addInputListener((data) => {
-        if (matchesKey(data, 'ctrl+d') || matchesKey(data, 'ctrl+c')) { exit(); return { consume: true } }
-        // /q is matched against the input's real value, so paste and cursor
+        // Ctrl+C interrupts the in-flight run; when idle it exits.
+        if (matchesKey(data, 'ctrl+c')) {
+          if (this.busy) options.onInterrupt?.()
+          else exit()
+          return { consume: true }
+        }
+        if (matchesKey(data, 'ctrl+d')) { exit(); return { consume: true } }
+        // /q is matched against the editor's real text, so paste and cursor
         // movement cannot desynchronize the check. The listener runs before
-        // the focused Input, so consuming Enter keeps /q away from onSubmit.
-        if ((data === '\r' || data === '\n') && input.getValue().trim() === '/q') {
+        // the focused editor, so consuming Enter keeps /q away from onSubmit.
+        if ((data === '\r' || data === '\n') && input.getText().trim() === '/q') {
           exit()
           return { consume: true }
         }

@@ -202,7 +202,7 @@ export class OpenAIProvider implements ChatProvider {
     this.apiKey = options.apiKey
   }
 
-  async *completeStream(messages: Message[], tools: Tool[]): AsyncGenerator<StreamChunk> {
+  async *completeStream(messages: Message[], tools: Tool[], signal?: AbortSignal): AsyncGenerator<StreamChunk> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: messages.map(toWireMessage),
@@ -218,6 +218,7 @@ export class OpenAIProvider implements ChatProvider {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal,
     })
 
     if (!response.ok) {
@@ -230,6 +231,7 @@ export class OpenAIProvider implements ChatProvider {
     if (contentType.toLowerCase().includes('text/event-stream')) {
       let yieldedText = false
       for await (const payload of ssePayloads(response)) {
+        signal?.throwIfAborted()
         let chunk: WireStreamChunk
         try {
           chunk = JSON.parse(payload) as WireStreamChunk

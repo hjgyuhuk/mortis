@@ -14,6 +14,8 @@ import { builtinTools } from './tools/index.js'
 import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, writeFileConfig, type Config } from './config.js'
 import { AgentTui } from './tui/index.js'
 import { loadAgentsMd } from './instructions.js'
+import { hydrateState, latestSession, saveSession, serializeState } from './session.js'
+import type { AgentState } from './agent/state.js'
 
 function parseCliArgs(argv: string[]) {
   const parsed = parseArgs({
@@ -26,6 +28,7 @@ function parseCliArgs(argv: string[]) {
       help: { type: 'boolean', short: 'h' } as const,
       init: { type: 'boolean' } as const,
       plain: { type: 'boolean' } as const,
+      continue: { type: 'boolean' } as const,
     },
     allowPositionals: true,
   })
@@ -51,6 +54,7 @@ function usage(): string {
     '  --api-key <key>    API key (env: MORTIS_API_KEY)',
     '  --cwd <path>       Working directory for the agent',
     '  --plain            Disable the terminal UI (no animations)',
+    '  --continue         Resume the latest saved session (~/.mortis/sessions/latest.json)',
     '  --init             Write a config file to ~/.mortis/config.json',
     '  -h, --help         Show this help',
   ].join('\n')
@@ -91,18 +95,33 @@ async function main() {
   const useTui = !values.plain
   const agentsMd = loadAgentsMd(process.cwd())
 
+  // Session resume + checkpointing: persistence observes state transitions
+  // from outside the agent core, so a crash loses at most one transition.
+  const resumedState: AgentState | null = values.continue ? hydrateState(latestSession()) : null
+  const checkpoint = (state: AgentState): void => {
+    saveSession(serializeState(state, config.model))
+  }
+
   // Interactive mode: `pnpm dev` with no prompt drops straight into the TUI,
   // where the prompt is typed in the input box. Model/provider come from the
   // resolved config only — no setup phase.
   if (useTui && !argPrompt) {
-    const tui = new AgentTui(config.model, config.baseUrl, { interactive: true })
+    const tui = new AgentTui(config.model, config.baseUrl, {
+      interactive: true,
+      resumed: resumedState !== null,
+    })
     const agent = new Agent({
       provider,
       tools: builtinTools,
       systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
+      state: resumedState ?? undefined,
+      onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
     })
-    await tui.startInteractive((prompt) => agent.run(prompt))
+    await tui.startInteractive(
+      (prompt) => agent.run(prompt),
+      { onInterrupt: () => agent.abort('user interrupt') },
+    )
     return
   }
 
@@ -119,6 +138,8 @@ async function main() {
       provider,
       tools: builtinTools,
       systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
+      state: resumedState ?? undefined,
+      onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
     })
     try {
@@ -134,6 +155,8 @@ async function main() {
     provider,
     tools: builtinTools,
     systemPrompt: defaultSystemPrompt(builtinTools, agentsMd),
+    state: resumedState ?? undefined,
+    onTransition: checkpoint,
   })
   console.log(`mortis: talking to ${config.model} @ ${config.baseUrl}`)
   const answer = await agent.run(prompt)

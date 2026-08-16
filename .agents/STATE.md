@@ -5,20 +5,19 @@ description: Dynamic progress, lessons learned, and next steps.
 
 # Active Phase & Focus
 
-* Current: TUI chat-layout refactor and full code-review fix pass complete; feature-complete for the minimal loop
+* Current: four-layer architecture refactor (State/Decision/Effect-Scope/Transition) complete per user's 14-point review
 
 # Progress
 
 ## Done
 
-* [Code-review fixes] non-SSE multi tool_calls kept separate; empty `tools` omitted from wire; baseUrl strips all trailing slashes; SSE JSON.parse errors carry payload context — tests pass
-* [Config hygiene] `ensureFileConfig` never persists apiKey — test asserts file has no key after env-key run
-* [Tool hardening] edit requires unique match; read truncates at 64KiB; bash has timeout param (120s default, 600s max) — test/tools.test.ts (11 cases)
-* [Event rename] `assistant_delta` → `assistant_text` (payload is cumulative text)
-* [TUI refactor] interactive mode → TuiAltScreen chat layout: ScrollView transcript (follow:end), loader status row, boxed input; answers accumulate (removed `answers.clear()`); exit prints full transcript to scrollback — 61/61 tests, pty smoke verified
-* [Input polish] BorderedBox frame + BareInput (no "> " prefix); prompt echo in dark yellow (ANSI 33); Ctrl+C exit added
-* [System prompt] `defaultSystemPrompt(tools, agentsMd?)` builds tool list from actual Tools
-* [Typecheck] tsconfig.test.json; `pnpm typecheck` covers src + test
+* [Multi-line input] interactive editor replaced single-line Input: pi-tui Editor (Enter submits, Shift+Enter / backslash-Enter breaks line, up/down history, self-drawn frame, scrolls past ~30% terminal height); BorderedBox/BareInput wrappers deleted; busy path restores text via setText — 90/90 tests, pty verified two-line editing
+* [Phase A: State + reducer] AgentState{messages, status} with derived status; StateEvent discriminated union; run_interrupted/awaiting_user fill dangling tool calls; loop split into think/act; all transitions via reduce — 90/90 tests
+* [Phase B: Effect scope + cancellation] parent-linked Scope (fork/abort/dispose); completeStream/Tool.execute take optional signal (fetch + execFile native abort); layer-mapped cancellation (AbortError → RunInterruptedError → UI notice); Ctrl+C interrupts the running turn, idle exits — abort tests for provider/agent/tool pass
+* [Phase C: concurrent effects, ordered commit] act uses Promise.allSettled, commits tool_result/tool_error in declaration order; abort is not committed as failure; TUI rows tracked by Map<toolCallId> with reserved summary lines and ✓/✗ — order test (B finishes first, commits second) passes
+* [Phase D: sessions] SessionSnapshot{version:1} serialize/hydrate with validation (unknown versions → null); checkpoint on every transition via onTransition observer → ~/.mortis/sessions/latest.json; --continue resumes, header shows (resumed)
+* [Invariants] property-style test: seeded PRNG event sequences → status valid, non-running states sendable, structuredClone-stable
+* [Docs] AGENTS.md six invariants + responsibility boundaries; README architecture section; .agents/ synced
 
 ## In Progress
 
@@ -32,25 +31,28 @@ description: Dynamic progress, lessons learned, and next steps.
 
 ## ❌ Anti-patterns & Failed Hypotheses
 
-* **`basis: 0` in unbounded render** — pi-tui `VStack.render()` (used for the alt-screen exit document) gives grow entries their basis, clamped to minSize — official README pattern (`basis:0, grow:1`) silently truncates the exit transcript to 1 line — detected by asserting full content in `ui.render()` tests
-* **Mirroring keystrokes to track input state** — manually accumulating a char buffer desyncs on paste/cursor movement — read `input.getValue()` at event time instead
-* **Null vs undefined in wire protocols** — OpenAI-compatible endpoints send `id:null`/`name:null` in delta fragments; `!== undefined` fails to filter — use `!= null`
+* **Deriving 'done' from event shape alone** — plain assistant_message after unanswered tool calls claimed done but wasn't sendable — caught by the random-sequence invariant test; fix: done requires zero dangling calls
+* **Committing by completion order** — real timing would leak into replay/snapshots/tests; commit in declaration order instead
+* **Cancellation as tool failure** — an abort rejected by allSettled must propagate (run_interrupted), never commit as tool_error
+* **`basis: 0` in unbounded render** — pi-tui exit document truncates grow entries to minSize; use `basis: 'auto'` for the transcript
+* **Mirroring keystrokes to track input state** — read `input.getValue()` at event time
+* **Null vs undefined in wire protocols** — use `!= null` for optional SSE fragment fields
 
 ## ✅ Viable Paths & Confirmed Patterns
 
-* **Alt-screen chat layout** — `TuiAltScreen` + `VStack[header, ScrollView(transcript, follow:'end', primary), bottom]`: in-session scrollback, Ctrl+Shift+F search, stable resize, full transcript printed to scrollback on exit. Transcript entry must use `basis:'auto', grow:1, shrink:1`
-* **pi-tui input listener ordering** — `addInputListener` callbacks run before the focused component; `{consume:true}` intercepts keys (e.g. `/q` on Enter). Default `lineUp/lineDown` are unbound, so arrows reach the Input
-* **Wrapping over forking** — `BareInput`/`BorderedBox` wrap pi-tui components (render at adjusted width, slice/pad, pass through invalidate) instead of duplicating component internals
-* **SSE manual parsing** — TextDecoder + buffer splitting with `{stream:true}`, `[DONE]` marker, non-SSE JSON fallback
-* **Streaming Text → Markdown finalization** — live `Text` during streaming, swap to `Markdown` in `finalizeAnswer()`
-* **Tool-call index stitching** — accumulate by index; filter `null` fields; non-SSE path uses array index
+* **Reducer-owns-invariant pattern** — transitions that leave 'running' (run_interrupted, awaiting_user) synthesize missing tool results inside reduce; helpers never patch messages from outside
+* **Parent-linked Scope** — ~50 lines: fork for Agent/Run/Effect lifetimes, abort propagates down, dispose detaches; execFile/fetch accept signals natively so effects need no custom kill logic
+* **allSettled + ordered commit loop** — concurrency inside act(), determinism at the transition boundary; first abort in declaration order re-thrown
+* **Observers at the boundary** — onTransition drives checkpointing; the loop never knows persistence exists
+* **Alt-screen chat layout** — TuiAltScreen + VStack[header, ScrollView(follow:end), bottom]; basis 'auto' for the transcript entry
 
 # Key Decisions & Trade-offs
 
-* **Transcript accumulation via alt screen (not main-screen scrollback)** — in-session scrolling/search, no resize scrollback wipe — rejected the 1-line `answers.clear()` removal for worse UX
-* **`assistant_text` carries cumulative text** — TUI needs no accumulation; each event O(n) in text length
-* **Empty containers render 0 lines in pi-tui** — status row with transient Loader collapses naturally; no placeholder needed
+* **Status derived, not stored per-field** — State records what a resume needs; no currentTool/currentTurn transient detail
+* **Single latest.json checkpoint (not timestamped files)** — per-transition writes would spam many files; one overwritten file gives crash-resilience at the same guarantee
+* **agent_message plain text keeps 'running' when calls dangle** — never fabricate results for a finish; only interrupt/wait transitions synthesize
+* **Domain events carry full tool content** — truncation moved back into the TUI (display concern), fixing the layering the earlier "double truncation" removal got wrong
 
 # Immediate Next Steps
 
-* Optional: AbortSignal through `ChatProvider.completeStream` + cancel key in TUI (only remaining review item; changes public interface)
+* Optional: fast-check for richer property tests; per-effect cancel handles (EffectHandle) when sub-agents arrive; respond/wait decisions are defined but no protocol produces them yet

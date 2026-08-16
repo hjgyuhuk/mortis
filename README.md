@@ -43,10 +43,13 @@ MORTIS_BASE_URL=http://localhost:11434/v1 MORTIS_MODEL=qwen2.5-coder pnpm dev "�
 pnpm build
 node dist/cli.js --base-url http://localhost:11434/v1 --model qwen2.5-coder "列出项目文件"
 
-# 直接进入交互式 TUI（备用屏幕聊天布局）：无 prompt 参数即在输入框输入任务，Enter 提交，/q 或 Ctrl+C/Ctrl+D 退出
+# 直接进入交互式 TUI（备用屏幕聊天布局）：无 prompt 参数即在输入框输入任务，Enter 提交，/q 或 Ctrl+D 退出；Ctrl+C 中断运行中的回合（保留会话）
 pnpm dev
 pnpm dev "写个 fibonacci.ts 并运行验证"
 pnpm dev --plain "写个 fibonacci.ts 并运行验证"
+
+# 恢复最近一次会话继续聊（checkpoint 在每次状态转移后写入）
+pnpm dev --continue
 
 # 测试
 pnpm test
@@ -81,11 +84,13 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 
 基于 pi-tui。**默认启用**，`--plain` 是唯一关闭开关：
 
-- 无 prompt 参数时**直接进入交互模式**（备用屏幕聊天布局）：内置输入框，Enter 提交任务、`/q` 或 Ctrl+C/Ctrl+D 退出，**多轮答案累积**在滚动 transcript 里
+- 无 prompt 参数时**直接进入交互模式**（备用屏幕聊天布局）：**多行输入框**，Enter 提交、Shift+Enter 换行（不支持 Shift+Enter 的终端用行尾 `\`+Enter），↑/↓ 翻提交历史，`/q` 或 Ctrl+D 退出，**多轮答案累积**在滚动 transcript 里
+- **Ctrl+C 中断运行中的回合**：取消在飞的模型请求和 shell 命令，会话保留、可继续提问；空闲时按 Ctrl+C 直接退出
 - transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
+- 同一轮的多个工具调用**并发执行**，结果按声明顺序提交；工具行各自显示 ✓ / ✗
 - 带 prompt 参数的单次运行用主屏流式渲染：每轮工具调用一行，完成后 ✓ 与结果摘要，最终答案按 markdown 渲染
 
-实现：agent 通过 `onEvent` 回调发事件（`model_request` / `assistant_text` / `tool_start` / `tool_result`），`AgentTui` 订阅并驱动 pi-tui 组件树。模型与端点只从配置解析，无设置阶段。
+实现：agent 通过 `onEvent` 回调发 Domain 事件（`model_request` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`），`AgentTui` 订阅并派生全部显示。模型与端点只从配置解析，无设置阶段。
 
 ## 自定义供应商
 
@@ -107,7 +112,10 @@ Mortis **没有沙箱**。系统提示要求在当前仓库内工作，但 `writ
 
 ## 核心思想
 
-- **强类型自文档化**：类型即契约，`Message`/`Tool`/`ChatProvider` 直接映射 OpenAI wire 格式。
-- **接口隔离**：provider、工具、agent 循环三者解耦，各自可替换。
-- **显式失败**：工具错误返回文本给模型而非抛异常，模型可据此调整。
-- **测试驱动**：provider 用本地 mock 服务器验证 wire 翻译，agent 用脚本化 mock provider 验证循环逻辑。
+- **状态机内核**：`State → think → Decision → act(Effect) → Result → reduce → State`。State 是普通可序列化数据（`messages` + 派生的 `status`），reducer 是唯一的状态变换点。
+- **Decision 与 Effect 分离**：模型输出被解释为意图（respond / execute / wait / finish），tool 调用是一种 Effect；副作用并发执行，状态转移按声明顺序串行提交（deterministic）。
+- **Effect Scope 生命周期**：父链 Scope（Agent > Run > Effect）统一管理取消与清理；Ctrl+C 中断的是 Run，不是进程。
+- **强类型自文档化**：类型即契约，`Message`/`Decision`/`ChatProvider` 直接映射 OpenAI wire 格式。
+- **显式失败**：工具错误返回文本给模型而非抛异常，模型可据此调整；中断是正式的状态转移（`run_interrupted`），悬空 tool 调用自动补齐，会话始终可恢复。
+- **观察者边界**：TUI 与持久化只观察 State/事件；checkpoint 在每次转移后写入，`--continue` 恢复。
+- **测试驱动**：provider 用本地 mock 服务器，agent 用脚本化 mock provider，reducer 有随机序列的不变量测试。

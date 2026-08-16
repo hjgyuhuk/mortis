@@ -9,7 +9,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { resolve } from 'node:path'
-import type { Tool } from '../types.js'
+import type { Tool, ToolContext } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -118,7 +118,7 @@ export const bashTool: Tool = {
     },
     required: ['command'],
   },
-  async execute(args) {
+  async execute(args, context?: ToolContext) {
     const command = String(args.command)
     const cwd = args.cwd ? resolve(String(args.cwd)) : undefined
     const timeoutS = Math.min(
@@ -130,6 +130,7 @@ export const bashTool: Tool = {
         cwd,
         timeout: timeoutS * 1000,
         maxBuffer: 10 * 1024 * 1024,
+        signal: context?.signal,
       })
       const parts = [stdout, stderr].filter(Boolean)
       return parts.join('\n') || '(no output)'

@@ -91,4 +91,18 @@ describe('bash tool', () => {
     expect(result).toContain('command failed')
     expect(Date.now() - start).toBeLessThan(5000)
   }, 10_000)
+
+  it('kills the command when the context signal aborts', async () => {
+    const controller = new AbortController()
+    const start = Date.now()
+    const pending = bashTool.execute(
+      { command: 'sleep 30', timeout: 60 },
+      { signal: controller.signal },
+    )
+    setTimeout(() => controller.abort(), 50)
+
+    const result = await pending
+    expect(result).toContain('command failed')
+    expect(Date.now() - start).toBeLessThan(5000)
+  }, 10_000)
 })
