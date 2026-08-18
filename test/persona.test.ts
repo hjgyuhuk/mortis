@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  COMPACT,
   PLANNER,
   ensureDefaultPersonas,
   loadPersonas,
@@ -249,16 +250,20 @@ describe('persona markdown files', () => {
     expect(parsePersonaMarkdown('no frontmatter at all', 'x')).toBeNull()
   })
 
-  it('ensureDefaultPersonas creates the default planner.md once', () => {
+  it('ensureDefaultPersonas creates the default planner and compact personas once', () => {
     ensureDefaultPersonas()
     const plannerPath = join(personasDir(), 'planner.md')
+    const compactPath = join(personasDir(), 'compact.md')
     expect(existsSync(plannerPath)).toBe(true)
+    expect(existsSync(compactPath)).toBe(true)
     const original = readFileSync(plannerPath, 'utf8')
 
     writeFileSync(plannerPath, '---\nname: planner\ndescription: custom\n---\n\nMy custom prompt.')
     ensureDefaultPersonas()
     expect(readFileSync(plannerPath, 'utf8')).toContain('My custom prompt.') // never overwritten
     expect(original).toContain('You are Planner')
+    expect(readFileSync(compactPath, 'utf8')).toContain('You are Compact')
+    expect(COMPACT.name).toBe('compact')
   })
 
   it('loadPersonas reads every valid md and skips broken ones', () => {
@@ -268,7 +273,7 @@ describe('persona markdown files', () => {
     writeFileSync(join(personasDir(), 'broken.md'), 'not a persona file')
 
     const personas = loadPersonas()
-    expect(Object.keys(personas).sort()).toEqual(['planner', 'reviewer'])
+    expect(Object.keys(personas).sort()).toEqual(['compact', 'planner', 'reviewer'])
     expect(personas['reviewer']!.systemPrompt).toBe('Reviews things.')
   })
 })

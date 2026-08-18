@@ -61,6 +61,15 @@ describe('AgentTui rendering', () => {
     expect(lines.some((l) => l.includes('(interrupted: user interrupt)'))).toBe(true)
   })
 
+  it('renders context compaction as status only, without the summary', () => {
+    const tui = new AgentTui('m', 'http://x/v1')
+    tui.handle({ kind: 'context_compacting', reason: 'manual' })
+    tui.handle({ kind: 'context_compacted', reason: 'manual', removedMessages: 12 })
+    const lines = render(tui)
+    expect(lines.some((l) => l.includes('compacting context'))).toBe(true)
+    expect(lines.some((l) => l.includes('compacted context (12 messages)'))).toBe(true)
+  })
+
   it('previews thinking live, then commits a two-line gray block to the transcript', () => {
     const tui = new AgentTui('m', 'http://x/v1')
     tui.handle({ kind: 'model_request' })

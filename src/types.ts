@@ -43,7 +43,12 @@ export interface ToolContext {
 /** A side effect the agent intends to perform. Tools never mutate state. */
 export type Effect =
   | { kind: 'tool_call'; call: ToolCall }
+  /** A lease-authorized request to summarize, then replace active context. */
+  | { kind: 'context_compact'; call: ToolCall; reason: ContextCompactReason }
   // Future kinds slot in here: sub_agent, permission, sleep, human approval.
+
+/** Why the runtime granted the main agent one context-compact lease. */
+export type ContextCompactReason = 'manual' | 'threshold'
 
 /**
  * The model's intent for the next step. A decision describes; the runtime

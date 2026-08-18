@@ -4,9 +4,28 @@
 
 export { Agent, RunInterruptedError, type AgentOptions } from './agent/loop.js'
 export type { AgentEvent, AgentEventListener } from './agent/events.js'
-export { initialState, reduce, isSendable, type AgentState, type AgentStatus, type StateEvent } from './agent/state.js'
+export { initialState, reduce, isSendable, collectDangling, type AgentState, type AgentStatus, type StateEvent } from './agent/state.js'
+export {
+  COMPACT_CONTEXT_TOOL,
+  COMPACTED_CONTEXT_START,
+  COMPACTED_CONTEXT_END,
+  DEFAULT_CONTEXT_TRIGGER_RATIO,
+  compactableHistory,
+  compactContextTool,
+  compactedContextMessage,
+  compactionTask,
+  estimateContextTokens,
+  resolveInputTokenLimit,
+  rootSystemMessages,
+  serializeCompactionHistory,
+  shouldCompactContext,
+  type ContextCompactor,
+  type ContextPolicy,
+  type ContextRuntime,
+  type ModelContextLimits,
+} from './context.js'
 export { Scope } from './agent/scope.js'
-export { OpenAIProvider, type OpenAIProviderOptions } from './provider/openai.js'
+export { OpenAIProvider, ProviderHttpError, type OpenAIProviderOptions } from './provider/openai.js'
 export { createBuiltinTools, builtinTools, askUserTool, DEFAULT_ASK_OPTIONS } from './tools/index.js'
 export {
   FilesystemPolicy,
@@ -29,17 +48,23 @@ export {
 export {
   ensureFileConfig,
   resolveConfig,
+  resolveModelRef,
   defaultSystemPrompt,
   configDir,
   configPath,
   type Config,
   type FilesystemConfig,
+  type ModelCapability,
+  type ModelConfig,
+  type ProviderConfig,
+  type ResolvedModel,
 } from './config.js'
 export { AgentTui, OptionsBar } from './tui/index.js'
 export type { AgentTuiOptions } from './tui/index.js'
 export { loadAgentsMd, findGitRoot } from './instructions.js'
 export {
   PERSONAS,
+  COMPACT,
   PLANNER,
   ensureDefaultPersonas,
   loadPersonas,
@@ -63,6 +88,7 @@ export {
 } from './session.js'
 export type {
   ChatProvider,
+  ContextCompactReason,
   Decision,
   Effect,
   Message,

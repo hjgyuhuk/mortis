@@ -5,30 +5,29 @@ description: Dynamic progress, lessons learned, and next steps.
 
 # Active Phase & Focus
 
-* Current: four-layer architecture refactor (State/Decision/Effect-Scope/Transition) complete per user's 14-point review
+* Current Sprint / Focus: Main-agent-authorized context compact replaces the earlier runtime-owned compact path. The working diff is ready for review and commit.
+* Working tree: configuration, context runtime, agent, provider, persona, TUI, tests, bilingual README files, and context files are modified.
 
 # Progress
 
 ## Done
 
-* [Persona as user files] personas live in `~/.mortis/persona/*.md` (frontmatter name/description/model/thinking-effort + system-prompt body; name falls back to filename; empty body invalid); `ensureDefaultPersonas` writes the default planner.md once (never overwrites); `loadPersonas` registers every valid md, skipping broken files; personaTool takes the registry; cli /planner uses the on-disk planner with a restore hint when deleted — 152/152 tests
-* [Planner discipline] planner persona never writes full implementation code (overview only: steps/files/signatures/edge cases); /planner decision prompt now mandates ask_user confirmation BEFORE any execution and states the main agent always implements; verified live: question panel appeared, user approved, main agent wrote the code itself — 147/147 tests
-* [Persona → main-agent decision loop] /planner now hands evidence to the main agent automatically: decision prompt enumerates accept-and-execute / reject / consult persona again / gather info / ask_user; model-side `persona` tool added (registry PERSONAS, evidence enters state as tool_result via reducer, aborts propagate raw through executeTool); AbortError translation moved to orchestration (cli /planner maps to RunInterruptedError; tool path uses the agent's existing mapping) — 147/147 tests
-* [Persona module + /planner] cognitive roles as pure effects: PersonaDefinition{model/prompt/budget overrides, no tools}, runPersona (single completion, domain-event streaming incl. reasoning, AbortError→RunInterruptedError layer mapping), parsePersonaOutput (five `##` sections, tolerant); PLANNER definition with output contract; `/planner <task>` slash dispatch in interactive cli with unified cancelCurrent (Esc/Ctrl+C interrupt persona or agent run alike); v1 boundary: result displayed, not yet in conversation state (model-side persona tool is next) — 142/142 tests
-* [Ask-user panel] `ask_user` tool (interactive only) blocks on TUI dialog: `✻ question` panel inserted into the layout tree between transcript and input (ScrollView question area is a real viewport → native mouse-wheel routing; basis-auto/maxSize-12 for unbounded render), OptionsBar below (↑/↓/←/→ select, Enter confirm, Esc quick-reject); Revise semantics = model wraps up, next user message is the correction (only deadlock-free option); abort races the tool via ToolContext signal (AbortError → run_interrupted); run_interrupted closes the panel defensively — 136/136 tests, live pty verified (model used custom Create/Cancel options, keyboard-selected Cancel, fed back and wrapped up)
-* [bash OS sandbox] bash now runs inside an OS sandbox generated from the policy — darwin: `sandbox-exec` Seatbelt (global file-write* deny + canonical-subpath allows + file-read* denies; live-verified semantics incl. /private/tmp alias and timeout signal propagation to grandchildren); linux: bwrap (ro-bind root, rw binds, tmpfs masking, untested on this machine); null fallback reports "unsandboxed" honestly in startup warning + system prompt + tool description; `--no-sandbox` / `filesystem.sandbox` opt-out; `FilesystemPolicy.zones()` exposes writable/denied unions — 129/129 tests incl. live macOS enforcement (outside write → Operation not permitted, denied read fails, scratch write works)
-* [Filesystem policy] five zones enforced on read/write/edit (custom R/RW/DENY highest via config `filesystem.rules` + `--fs-rw/--fs-r/--fs-deny`; secrets ~/.ssh+~/.mortis; workspace=git root RW; scratch=/tmp RW; outside R); realpath canonicalization defeats symlink escapes (incl. dangling links on write targets); tools moved to `createBuiltinTools(policy)` factory (`builtinTools` = openPolicy default); bash only checks cwd (no sandbox, documented); policy.describe() appended to system prompt — 124/124 tests
-* [Esc interrupt] Esc interrupts the in-flight run and returns to the input box (idle: falls through to the editor, e.g. autocomplete close); global key handling extracted to testable handleGlobalKey; Ctrl+C busy-interrupt/idle-exit unchanged — 102/102 tests, pty verified mid-stream interrupt then continued typing
-* [Append-only invariant] history-never-rewritten promoted to invariant #7 (AGENTS.md, state.ts header, .agents/CONTEXT.md) and locked by tests: reducer property test asserts old messages are an exact prefix of new after every event (incl. interrupt fill); agent test asserts each provider request extends the previous request's messages — 99/99 tests
-* [Two-stage thinking display] live reasoning preview in the bottom area (below the loader's 'reasoning…', above the input; last two lines, long lines tail-truncated with leading ellipsis, zero lines when empty) commits to the transcript as a `✻ thinking` gray two-line block when thinking ends (first answer text / tool start / interrupt / finalize / error) — 98/98 tests, LongCat real-endpoint pty verified both stages
-* [Thinking support] `thinking_effort` request field (CLI/env/config, omitted when unset) + reasoning streams parsed from `reasoning_content` (primary) and `reasoning` (alias), SSE and non-SSE; `assistant_thinking` domain event carries cumulative text; TUI shows `✻ thinking` dim-italic block with 'reasoning…' loader; reasoning never enters State (display-only) — 97/97 tests, real-endpoint pty verified (LongCat reasoning stream rendered)
-* [Multi-line input] interactive editor replaced single-line Input: pi-tui Editor (Enter submits, Shift+Enter / backslash-Enter breaks line, up/down history, self-drawn frame, scrolls past ~30% terminal height); BorderedBox/BareInput wrappers deleted; busy path restores text via setText — 90/90 tests, pty verified two-line editing
-* [Phase A: State + reducer] AgentState{messages, status} with derived status; StateEvent discriminated union; run_interrupted/awaiting_user fill dangling tool calls; loop split into think/act; all transitions via reduce — 90/90 tests
-* [Phase B: Effect scope + cancellation] parent-linked Scope (fork/abort/dispose); completeStream/Tool.execute take optional signal (fetch + execFile native abort); layer-mapped cancellation (AbortError → RunInterruptedError → UI notice); Ctrl+C interrupts the running turn, idle exits — abort tests for provider/agent/tool pass
-* [Phase C: concurrent effects, ordered commit] act uses Promise.allSettled, commits tool_result/tool_error in declaration order; abort is not committed as failure; TUI rows tracked by Map<toolCallId> with reserved summary lines and ✓/✗ — order test (B finishes first, commits second) passes
-* [Phase D: sessions] SessionSnapshot{version:1} serialize/hydrate with validation (unknown versions → null); checkpoint on every transition via onTransition observer → ~/.mortis/sessions/latest.json; --continue resumes, header shows (resumed)
-* [Invariants] property-style test: seeded PRNG event sequences → status valid, non-running states sendable, structuredClone-stable
-* [Docs] AGENTS.md six invariants + responsibility boundaries; README architecture section; .agents/ synced
+* [Core architecture] State, reducer, ordered effects, scopes, sessions, TUI, filesystem policy, sandbox, and personas are implemented. [Verification Proof: prior feature milestones recorded 90/90 through 152/152 passing tests]
+* [Multi-provider aliases] `providers` stores OpenAI connections. `models` maps each alias to a provider, literal model, and metadata. [Verification Proof: 19/19 config tests passed]
+* [Main agent and persona] Top-level `Config.model` selects the main-agent alias. Persona `model` selects an independent alias or a literal model. [Verification Proof: dedicated LongCat and OpenCode resolution tests passed]
+* [Safety] Automatic config creation removes top-level and provider API keys. [Verification Proof: provider-key persistence test passed]
+* [Documentation] English and Chinese README files show the JSON equivalent of the multi-provider configuration. [Verification Proof: examples match `resolveConfig` and `resolveModelRef`]
+* [Full regression before context compact] All test modules passed. [Verification Proof: `pnpm test` passed 159/159 tests]
+* [Build] TypeScript build completed. [Verification Proof: `pnpm build` passed]
+* [Diff hygiene] No whitespace errors exist in the working diff. [Verification Proof: `git diff --check` passed]
+* [Lease-authorized compact] Agent creates one private lease only at the 80% threshold or `/compact`. The main agent must call sole direct action `compact_context` with `{}`. [Verification Proof: context Agent tests cover threshold and manual leases]
+* [Persona boundary] The `compact` persona receives only structured non-system history and returns summary data. It never receives a lease, State, Effect, or replacement interface. [Verification Proof: ContextCompactor signature and Agent effect tests]
+* [Atomic replacement] The authorized direct Effect calls the persona, then reducer commits the root-preserving untrusted summary. It stores no direct tool call or result. [Verification Proof: context reducer and Agent tests]
+* [Capacity policy] Request JSON uses a conservative UTF-8 bytes/2 estimate. Compact triggers at 80% of `maxInputSize`, or `maxContextSize - maxOutputSize`. Missing metadata disables preflight. Provider context-limit errors do not retry or compact. [Verification Proof: context policy tests]
+* [Failure boundaries] Missing, mixed, or malformed direct calls, persona failure, empty summary, cancellation, and provider context-limit errors retain current history. [Verification Proof: context Agent tests]
+* [Compact persona] Default `compact.md` is generated without overwriting user edits. CLI uses its alias-aware model selection in interactive, TUI, and plain runs. [Verification Proof: persona and Agent tests]
+* [Manual compact] Interactive `/compact` asks the main agent to authorize a lease. It never enters Agent history. [Verification Proof: manual compact test]
+* [Final verification] Typecheck, build, full test suite, and diff whitespace check passed. [Verification Proof: `pnpm typecheck`, `pnpm build`, `pnpm test` passed 174/174 tests, `git diff --check` passed]
 
 ## In Progress
 
@@ -42,28 +41,31 @@ description: Dynamic progress, lessons learned, and next steps.
 
 ## ❌ Anti-patterns & Failed Hypotheses
 
-* **Deriving 'done' from event shape alone** — plain assistant_message after unanswered tool calls claimed done but wasn't sendable — caught by the random-sequence invariant test; fix: done requires zero dangling calls
-* **Committing by completion order** — real timing would leak into replay/snapshots/tests; commit in declaration order instead
-* **Cancellation as tool failure** — an abort rejected by allSettled must propagate (run_interrupted), never commit as tool_error
-* **`basis: 0` in unbounded render** — pi-tui exit document truncates grow entries to minSize; use `basis: 'auto'` for the transcript
-* **Mirroring keystrokes to track input state** — read `input.getValue()` at event time
-* **Null vs undefined in wire protocols** — use `!= null` for optional SSE fragment fields
+* **Putting provider settings inside model aliases** — providers need independent reuse and credentials — resolve model alias through a provider registry.
+* **Treating host sandbox availability as implementation proof** — `sandbox-exec` exists but the host denies `sandbox_apply` — separate policy generation checks from enforcement checks.
+* **Committing effects by completion order** — timing would leak into replay and snapshots — commit in declaration order.
+* **Treating cancellation as tool failure** — aborts must become `run_interrupted` — propagate AbortError through the agent boundary.
+* **Giving a generic context replace API to tools or personas** — it bypasses reducer authority and creates an undo surface — keep the lease inside Agent memory and expose only a zero-argument direct action to the main agent.
 
 ## ✅ Viable Paths & Confirmed Patterns
 
-* **Reducer-owns-invariant pattern** — transitions that leave 'running' (run_interrupted, awaiting_user) synthesize missing tool results inside reduce; helpers never patch messages from outside
-* **Parent-linked Scope** — ~50 lines: fork for Agent/Run/Effect lifetimes, abort propagates down, dispose detaches; execFile/fetch accept signals natively so effects need no custom kill logic
-* **allSettled + ordered commit loop** — concurrency inside act(), determinism at the transition boundary; first abort in declaration order re-thrown
-* **Observers at the boundary** — onTransition drives checkpointing; the loop never knows persistence exists
-* **Alt-screen chat layout** — TuiAltScreen + VStack[header, ScrollView(follow:end), bottom]; basis 'auto' for the transcript entry
+* **Provider and model separation** — one provider may serve many aliases — model metadata stays independent from credentials.
+* **Alias resolution** — main-agent and persona selectors use `resolveModelRef` — both paths send the configured literal model to the provider.
+* **Persona boundary** — personas run one completion without tools — the main agent retains execution authority.
+* **Reducer-owned invariant repair** — interruption and user-wait transitions synthesize missing tool results — every non-running state remains sendable.
+* **Policy-derived sandbox** — writable and denied roots come from FilesystemPolicy — the CLI reports when kernel enforcement is unavailable.
+* **Observer checkpointing** — persistence observes transitions — Agent Core stays independent of session storage.
+* **Root-preserving compact** — compact only between requests with no dangling calls — reducer can replace the non-system suffix without breaking wire pairing.
+* **Lease-authorized compact** — compact persona supplies data, main agent authorizes the direct Effect, and reducer commits State — no one layer crosses the other two boundaries.
 
 # Key Decisions & Trade-offs
 
-* **Status derived, not stored per-field** — State records what a resume needs; no currentTool/currentTurn transient detail
-* **Single latest.json checkpoint (not timestamped files)** — per-transition writes would spam many files; one overwritten file gives crash-resilience at the same guarantee
-* **agent_message plain text keeps 'running' when calls dangle** — never fabricate results for a finish; only interrupt/wait transitions synthesize
-* **Domain events carry full tool content** — truncation moved back into the TUI (display concern), fixing the layering the earlier "double truncation" removal got wrong
+* **Two-level model registry** — model aliases reference provider aliases — credentials and endpoints are not duplicated for each model.
+* **API key non-persistence** — automatic config creation omits keys — plaintext credential leaks are avoided.
+* **Single latest session** — one checkpoint file limits storage churn — crash recovery keeps the latest transition only.
+* **Irreversible compact** — discard old context after the reducer transition — no undo, revision storage, or restoration UI exists.
+* **No overflow bypass** — provider rejection cannot create a lease retroactively — configure capacity metadata and compact before the threshold.
 
 # Immediate Next Steps
 
-* Optional: fast-check for richer property tests; per-effect cancel handles (EffectHandle) when sub-agents arrive; respond/wait decisions are defined but no protocol produces them yet
+* Review and commit the combined working diff.

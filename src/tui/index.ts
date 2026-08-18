@@ -276,6 +276,16 @@ export class AgentTui {
         this.thinkingPreview.setText('')
         this.startLoader('thinking…')
         break
+      case 'context_compacting':
+        this.commitThinking()
+        this.streamText = null
+        this.answers.addChild(new Text(theme.muted('✻ compacting context…'), 1, 0))
+        this.startLoader('compacting context…')
+        break
+      case 'context_compacted':
+        this.answers.addChild(new Text(theme.muted(`✻ compacted context (${event.removedMessages} messages)`), 1, 0))
+        this.startLoader('thinking…')
+        break
       case 'assistant_thinking':
         // Live preview under the loader, above the input: last two lines.
         this.pendingThinking = event.content

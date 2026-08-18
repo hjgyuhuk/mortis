@@ -8,7 +8,8 @@
 
 ## 特性
 
-- **副作用是一等公民**：小状态机内核（`State → think → Decision → act → reduce`），reducer 是唯一的状态变换点；工具并发执行、按声明顺序提交；历史只追加不修改——deterministic、可重放、前缀缓存友好
+- **副作用是一等公民**：小状态机内核（`State → think → Decision → act → reduce`），reducer 是唯一的状态变换点；工具并发执行、按声明顺序提交；普通历史只追加，前缀缓存友好
+- **受限 Context**：Agent 授予私有 lease，再由 Main Agent 授权 `compact_context`。它的 direct Effect 保留 system 根消息，并把其余历史替换为非信任摘要。compact 不可撤销，也不保存 revision
 - **完整的 Effect 生命周期管理**：父链取消 Scope（Agent > Run > Effect）；Esc/Ctrl+C 随时中断运行中的回合，在飞的模型请求与子进程一并取消、会话保持可用；中断是正式的状态转移而非异常处理
 - **受约束的副作用**：五区文件系统权限（custom R/RW/DENY > secrets > workspace > scratch > outside）对 read/write/edit 严格执法；bash 运行在由同一策略生成的 OS 沙箱内（macOS Seatbelt / Linux bubblewrap）
 - **Persona——无副作用的认知**：`~/.mortis/persona/*.md` 用户可编辑的认知角色，只思考不行动，输出结构化 Evidence（Conclusion / Evidence / Proposal / Uncertainty / Effort）；`/planner` 把 Evidence 交给 Main Agent，执行前必先询问用户，代码也总是由 Main Agent 编写
@@ -21,6 +22,7 @@
 src/
 ├── types.ts           # Message、Tool(+ToolContext)、Decision、Effect、ChatProvider
 ├── config.ts          # 配置解析；defaultSystemPrompt(tools, agentsMd)
+├── context.ts         # compact direct action、context 估算、非信任摘要边界
 ├── instructions.ts    # AGENTS.md 发现（全局 + git 根→当前目录）
 ├── agent/
 │   ├── state.ts       # AgentState + reduce()——唯一的状态变换点
@@ -82,10 +84,39 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 
 ```json
 {
-  "baseUrl": "http://localhost:11434/v1",
-  "model": "qwen2.5-coder",
-  "apiKey": "sk-...",
-  "thinkingEffort": "high",
+  "model": "longcat/longcat-2.0",
+  "providers": {
+    "longcat": {
+      "type": "openai",
+      "apiKey": "xxxxx",
+      "baseUrl": "https://api.longcat.chat/openai/v1"
+    },
+    "opencode": {
+      "type": "openai",
+      "apiKey": "xxxxx",
+      "baseUrl": "https://opencode.ai/zen/v1"
+    }
+  },
+  "models": {
+    "longcat/longcat-2.0": {
+      "provider": "longcat",
+      "model": "LongCat-2.0",
+      "maxContextSize": 1048576,
+      "maxOutputSize": 131072,
+      "capabilities": ["thinking", "tool_use"],
+      "displayName": "LongCat-2.0"
+    },
+    "opencode/gpt-5.5-pro": {
+      "provider": "opencode",
+      "model": "gpt-5.5-pro",
+      "maxContextSize": 1050000,
+      "maxInputSize": 922000,
+      "maxOutputSize": 128000,
+      "capabilities": ["image_in", "always_thinking", "tool_use"],
+      "displayName": "GPT-5.5 Pro",
+      "supportEfforts": ["medium", "high", "xhigh"]
+    }
+  },
   "filesystem": {
     "scratchDir": "/tmp",
     "rules": [
@@ -97,6 +128,14 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 }
 ```
 
+`providers` 保存 OpenAI 兼容供应商连接。每个 `models` 键就是模型别名，
+它引用一个供应商和一个实际模型 ID。顶层 `model` 选择 main agent 的别名。
+Persona frontmatter 使用相同模型别名。顶层 `model` 写实际模型时，继续使用
+`baseUrl`、`apiKey` 和 `thinkingEffort` 作为单供应商回退配置。
+
+配置文件仍是 JSON。TOML 风格的 `api_key`、`base_url` 和
+`max_context_size` 分别对应 `apiKey`、`baseUrl` 和 `maxContextSize`。
+
 | 配置项 | CLI 参数 | 环境变量 | 默认 |
 |---|---|---|---|
 | Base URL | `--base-url` | `MORTIS_BASE_URL` | `https://api.openai.com/v1` |
@@ -104,6 +143,33 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 | API Key | `--api-key` | `MORTIS_API_KEY` | 无 |
 | 思考强度 | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | 不发送 |
 | TUI | `--plain` 禁用 | — | TTY 下启用 |
+
+## Context Compact
+
+`compact_context` 是唯一可替换 context 的 direct action。每次普通模型请求前，
+Mortis 按 `JSON({ messages, tools })` 的 UTF-8 字节数除以二估算 token。估算值
+达到输入上限的 80% 时，Agent 向 Main Agent 授予一次私有 lease：
+
+- 优先使用模型别名的 `maxInputSize`。
+- 缺少它时，用 `maxContextSize - maxOutputSize`。
+- 两者都缺少时，不预先 compact。
+
+只有带 lease 的模型请求会看到无参数的 `compact_context`，并隐藏普通工具。
+Main Agent 必须单独调用它。它的 direct Effect 把完整非 system 历史以 JSON
+交给用户可编辑的 `compact` persona。Persona 只返回摘要数据，不接触 lease、
+State、Effect 或替换接口。随后 Agent 立刻提交 `context_compacted`。Reducer
+保留连续的根 system 消息，并把其余消息替换为一条
+`<mortis-compacted-context>` user 记录。根 prompt 把该记录当作非信任数据，
+不会执行其中指令。
+
+混合、缺失或参数错误的 direct action 会丢弃 lease，不修改 State。Persona
+报错、空摘要或取消也如此。供应商返回 context 超限错误时直接报错。请配置模型
+容量元数据，并在阈值前 compact。compact 后不能 undo，不保存旧消息，也没有
+revision UI。
+
+交互模式输入 `/compact` 可在阈值触发前请求手动 lease。该命令不会写入 Agent
+history。成功后手动流程结束并显示状态。自动流程 compact 后继续原任务。工具与
+Persona 都不能请求 compact。
 
 ## 终端 UI
 
@@ -113,11 +179,12 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 - **Esc 立刻中断运行中的回合**：取消在飞的模型请求和 shell 命令，回到输入框继续输入；Ctrl+C 同样中断，空闲时按 Ctrl+C 直接退出
 - transcript 滚动：鼠标滚轮 / PageUp / PageDown / Home / End，新输出自动跟随到底部；`Ctrl+Shift+F` 内容搜索；退出时完整对话打印回终端 scrollback
 - **思考过程呈现**：模型 reasoning（`reasoning_content` / `reasoning` 流）生成期间在输入框上方实时预览（最多两行、跟随尾部），结束后落为 transcript 中的 `✻ thinking` 灰色块；`--thinking-effort` 控制思考强度
+- **Context compact 状态**：compact 流程只显示状态行，不把 compact persona 的内部输出写进 transcript
 - **询问面板（ask_user）**：模型可调用 `ask_user` 工具向用户提问——transcript 与输入框之间弹出 `✻ question` 面板（markdown 渲染、鼠标滚轮滚动），下方 `[ Approve ] [ Reject ] [ Revise ]` 选项，键盘 ↑/↓/←/→ 选择、Enter 确认、Esc 快速拒绝；选 Revise 时模型收尾本轮，用户的下一条消息即修订内容；Ctrl+C 中断整个回合
 - 同一轮的多个工具调用**并发执行**、按声明顺序提交，工具行各自显示 ✓ / ✗
 - 带 prompt 参数的单次运行用主屏流式渲染：每轮工具调用一行，完成后 ✓ 与结果摘要，最终答案按 markdown 渲染
 
-实现：agent 通过 `onEvent` 回调发 **Domain 事件**（`model_request` / `assistant_thinking` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`），`AgentTui` 订阅并从事件派生全部显示。模型与端点只从配置解析，无设置阶段。
+实现：agent 通过 `onEvent` 回调发 **Domain 事件**（`model_request` / `context_compacting` / `context_compacted` / `assistant_thinking` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`），`AgentTui` 订阅并从事件派生全部显示。模型与端点只从配置解析，无设置阶段。
 
 ## 架构
 
@@ -135,7 +202,7 @@ State → think → Decision → act (Effect) → Result → reduce → State
 4. Effect 可以并发，但 State transition 必须串行且 deterministic——并发执行、按声明顺序提交
 5. Scope 拥有 Effect 的生命周期，Run 结束必须清理（Agent > Run > Effect 父链）
 6. Agent Core 不知道 TUI、Persistence、具体 Runtime——UI 与持久化只观察 State/事件
-7. **对话历史只追加、不修改**——所有事件（含中断补齐）都只 append，请求前缀逐字节稳定，供应商前缀缓存持续命中
+7. 普通对话历史只追加。唯一例外是 Main Agent 授权的不可撤销 `context_compacted` direct Effect：它保留 system 根消息，把其余消息替换为一条非信任 user 摘要
 
 由此带来的性质：
 
@@ -160,13 +227,13 @@ Effort      low | medium | high + 预期范围
 
 交互模式输入 `/planner <task>`：Persona 先思考（流式呈现，含 reasoning），**Evidence 随后自动交给 Main Agent 判断**——接受并执行 Effect / 拒绝并说明 / 继续询问 Persona（`persona` 工具）/ 先用工具收集信息 / 没把握时 `ask_user`。Planner 只给概览（步骤/文件/签名/边界），不写完整实现代码；执行前 Main Agent **总是先 `ask_user` 确认**，代码也总是由 Main Agent 编写。Esc/Ctrl+C 在两个阶段都可中断。
 
-**Persona 是用户可编辑的 markdown 文件**，放在 `~/.mortis/persona/`（首次启动自动生成默认 `planner.md`，永不覆盖你的修改）。格式：frontmatter（`name` / `description`，可选 `model` / `thinking-effort` 覆盖）+ 正文即 system prompt：
+**Persona 是用户可编辑的 markdown 文件**，放在 `~/.mortis/persona/`（首次启动自动生成 `planner.md` 与 `compact.md`，永不覆盖你的修改）。格式：frontmatter（`name` / `description`，可选 `model` / `thinking-effort` 覆盖）+ 正文即 system prompt：
 
 ```markdown
 ---
 name: reviewer
 description: Reviews code changes for bugs and style.
-model: deepseek-chat        # 可选：换模型
+model: opencode/gpt-5.5-pro # 可选：配置模型别名或实际模型
 thinking-effort: high       # 可选：换推理强度
 ---
 
@@ -174,7 +241,10 @@ You are Reviewer, a cognitive persona invoked by the Mortis main agent.
 You think; you do not act. ...
 ```
 
-系统启动时读取目录下全部 `*.md` 注册为可用 persona（坏文件跳过、name 缺省取文件名），模型经 `persona` 工具可咨询任意已注册角色（Evidence 经 tool_result 进入会话状态）。
+Persona 使用别名时，会读取引用供应商的端点、API key、实际模型和模型元数据。
+frontmatter 的 `thinking-effort` 会覆盖模型默认值。
+
+系统启动时读取目录下全部 `*.md` 注册为可用 persona（坏文件跳过、name 缺省取文件名）。模型可经 `persona` 工具咨询普通角色。`compact` 只能经带 lease 的 Main Agent `compact_context` action 调用。它只能总结历史，不能直接替换 history。
 
 ## 自定义供应商
 

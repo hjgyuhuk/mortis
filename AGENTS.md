@@ -5,16 +5,17 @@
 ## 结构
 
 - `src/types.ts` — 共享类型（Message / Tool / ToolContext / Decision / Effect / ChatProvider），映射 OpenAI wire 格式
-- `src/provider/openai.ts` — OpenAI API 兼容供应商（SSE 流解析 + tool-call 缝合）
+- `src/provider/openai.ts` — OpenAI API 兼容供应商（SSE 流解析 + tool-call 缝合 + HTTP 状态错误）
 - `src/tools/index.ts` — 内置工具 read / write / edit / bash（工厂 `createBuiltinTools(policy)`）+ ask_user（交互模式询问面板）
 - `src/fs-policy.ts` — 文件系统五区权限（custom 最高 > secrets > workspace > scratch > outside）
 - `src/sandbox.ts` — bash 的 OS 级沙箱（darwin: sandbox-exec/Seatbelt；linux: bwrap；不可用则如实降级）
+- `src/context.ts` — context compact direct action、容量估算、非信任摘要边界
 - `src/agent/state.ts` — AgentState + `reduce()`（唯一状态变换点；不变量的家）
 - `src/agent/loop.ts` — Agent 循环（think → act）+ `RunInterruptedError`
 - `src/agent/scope.ts` — 父链取消 Scope（Agent > Run > Effect 层次）
 - `src/agent/events.ts` — Domain 事件（UI 语义不进这里）
 - `src/session.ts` — 版本化 `SessionSnapshot` + latest checkpoint
-- `src/persona.ts` — Persona 认知角色（无工具、单次完成、结构化 Evidence；`~/.mortis/persona/*.md` 用户可编辑，默认生成 planner.md；`/planner` 用户入口 + 模型侧 persona 工具）
+- `src/persona.ts` — Persona 认知角色（无工具、单次完成、结构化 Evidence；默认生成 planner.md 与 compact.md；`/planner` 用户入口 + 模型侧 persona 工具）
 - `src/tui/index.ts` — pi-tui 终端 UI；交互模式用 TuiAltScreen 聊天布局（ScrollView transcript + 多行 Editor 输入框），单次模式用 TuiMainScreen
 - `src/cli.ts` — CLI 入口；无 prompt 参数且非 --plain 时进交互 TUI
 - `test/` — vitest：agent 用脚本化 mock provider，provider 用本地 mock HTTP 服务器，state 含不变量测试
@@ -27,9 +28,9 @@
 4. Effect 可以并发，但 State transition 必须串行且 deterministic（并发执行、按声明顺序提交）
 5. Scope 拥有 Effect 的生命周期，Run 结束必须清理
 6. Agent Core 不知道 TUI、Persistence、具体 Runtime —— UI 与持久化只观察 State/事件
-7. **对话历史只追加、不修改**：所有事件（含中断补齐、awaiting_user）都只 append，从不回改既有消息——请求前缀逐字节稳定，供应商前缀缓存可命中；system prompt 在进程内只构建一次，`--continue` 从快照原样恢复（含首条 system 消息）
+7. **普通对话历史只追加**：普通事件、中断补齐和 awaiting_user 都只 append。唯一例外是 Main Agent 已授权的 `context_compacted`：Agent 只在 80% 阈值或 `/compact` 时创建私有一次性 lease，Main Agent 单独调用 `compact_context` 后才可替换。它保留连续的根 system 消息，把其余历史替换为一条非信任 user 摘要。该替换不可 undo，不保存 revision。compact persona 只返回数据，不接触 lease、State 或 Effect。
 
-职责边界：Model → Decision，Tool → ToolResult，Runtime → 执行 Effect，Reducer → 唯一改 State，UI / Persistence → 只观察。
+职责边界：Model → Decision，Main Agent lease → context_compact Effect，Compact Persona → 摘要数据，Tool → ToolResult，Reducer → 唯一改 State，UI / Persistence → 只观察。
 
 状态保证：任何 `status !== 'running'` 的状态都可直接发送（悬空 tool 调用由 `run_interrupted` / `awaiting_user` 转移补齐合成结果）。
 

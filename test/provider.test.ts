@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
-import { OpenAIProvider } from '../src/provider/openai.js'
+import { OpenAIProvider, ProviderHttpError } from '../src/provider/openai.js'
 import type { StreamChunk, Tool } from '../src/types.js'
 
 const servers: Server[] = []
@@ -310,6 +310,11 @@ describe('OpenAIProvider', () => {
 
     const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
     await expect(collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))).rejects.toThrow('provider request failed (401): bad key')
+    await expect(collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))).rejects.toMatchObject({
+      name: 'ProviderHttpError',
+      status: 401,
+      body: 'bad key',
+    } satisfies Partial<ProviderHttpError>)
   })
 
   it('cancels a stalled SSE stream through the signal', async () => {

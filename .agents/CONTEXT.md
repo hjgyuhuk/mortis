@@ -4,57 +4,66 @@ description: Static system invariants, architecture.
 ---
 
 # Goal
-- Minimal coding agent learning project
-- OpenAI-compatible custom provider with streaming support
-- Chat-style interactive TUI: scrolling transcript, accumulating answers, boxed input
+
+- Build a minimal coding agent learning project.
+- Support OpenAI-compatible streaming providers and tool calls.
+- Provide interactive TUI and plain CLI modes.
+- Let user-editable personas return planning evidence without tools.
+- Enforce filesystem access through policy checks and an OS sandbox when available.
 
 # Invariants & Constraints (Universal Properties)
 
-Six core invariants (see AGENTS.md for the full contract):
-1. State is plain, serializable data (messages + derived status)
-2. reduce() is the only state mutation authority
-3. Decision describes intent, never executes; Effects never mutate state
-4. Effects may run concurrently; transitions are serial and deterministic (concurrent execution, ordered commit)
-5. Scopes own effect lifetimes; run end must clean up (Agent > Run > Effect parent chain)
-6. Agent core knows no TUI / Persistence / Runtime — they observe state/events
-7. History is append-only: every event (incl. interrupt fill / awaiting_user) only appends; request prefix stays byte-stable so provider prefix caching hits. System prompt is built once per process; --continue restores snapshot messages verbatim
-
-- [Type System] strict + noUncheckedIndexedAccess, types as contracts
-- [Wire Format] Messages mirror OpenAI wire vocabulary; omit `tools` field when empty
-- [Event Contract] Events are specific discriminated unions — no catch-all (string type + unknown payload)
-- [Status Guarantee] Any state with status !== 'running' is directly sendable; run_interrupted/awaiting_user fill dangling tool calls
-- [Cancellation Layers] effects see AbortError → loop maps to RunInterruptedError → UI maps to a notice
-- [Config Hygiene] apiKey is never auto-persisted; explicit `--init` is the only path that writes a key
-- [Snapshot Format] SessionSnapshot {version, model, messages, savedAt}; hydrate validates and skips unknown versions
-- [Typecheck] `pnpm typecheck` runs both tsconfig.json (src) and tsconfig.test.json (test)
+- [State] State is plain, serializable data.
+- [Reducer] `reduce()` is the only state mutation authority.
+- [Decision] A Decision describes intent and never executes side effects.
+- [Effect] Effects never mutate State directly.
+- [Determinism] Effects may run concurrently, but transitions commit serially in declaration order.
+- [Scope] Scope owns effect lifetime through the Agent > Run > Effect parent chain.
+- [Boundary] Agent Core knows no TUI, persistence, or concrete runtime.
+- [History] Normal conversation transitions append only. `context_compacted` is the sole irreversible replacement transition: it preserves the leading system root and replaces all other messages with one untrusted user record.
+- [Context] Agent grants a private one-use lease only at the capacity threshold or interactive `/compact`. Only that model request sees `compact_context`. Its single direct Effect invokes `ContextCompactor` and commits `context_compacted`. The persona receives only transcript data and never receives a lease, State, Effect, or replacement authority.
+- [Sendability] Any non-running state can be sent. Interrupt and user-wait transitions fill dangling tool calls.
+- [Persona] Personas think without tools. The main agent decides and executes.
+- [Types] TypeScript uses strict checking, `noUncheckedIndexedAccess`, NodeNext imports, and explicit wire types.
+- [Events] Domain events are concrete discriminated unions.
+- [Cancellation] AbortError maps to RunInterruptedError at the agent boundary and becomes a UI notice.
+- [Config] API keys never persist during automatic config creation. Explicit `--init` may write one.
+- [Snapshot] Session snapshots use version 1 and reject unknown versions.
 
 # Critical Environment & Boundaries
-- [Runtime] Node.js >=22.19.0, pnpm 10.33.0
-- [TUI] pi-tui 0.84.2. Interactive = TuiAltScreen chat layout; oneshot = TuiMainScreen. Ctrl+C interrupts a running turn (idle: exits); scroll: wheel/PageUp/Home/End; search: Ctrl+Shift+F; exit: /q, Ctrl+D
-- [Security] No sandbox: write/edit/bash accept arbitrary absolute paths
-- [Testing] vitest with local mock HTTP servers and scripted mock providers; reducer has property-style invariant tests
-- [Config] `~/.mortis/` (config.json + sessions/latest.json) + env vars; precedence CLI > env > file > defaults
+
+- [Runtime] Node.js >=22.19.0 and pnpm 10.33.0.
+- [Provider] `OpenAIProvider` supports SSE and non-SSE JSON responses, and preserves non-success HTTP status in `ProviderHttpError`.
+- [TUI] Interactive mode uses pi-tui AltScreen with a scrolling transcript and multiline Editor.
+- [Filesystem] Read, write, and edit enforce FilesystemPolicy. Workspace and scratch are writable by default.
+- [Sandbox] Bash uses Seatbelt on macOS or bubblewrap on Linux when available. The CLI reports unsandboxed fallback honestly.
+- [Config] Config lives under `~/.mortis`. Resolution order is CLI > environment > file > defaults.
+- [Models] `providers` stores OpenAI-compatible connections. `models` maps aliases to providers, literal model IDs, and model metadata.
+- [Personas] Persona files live under `~/.mortis/persona/*.md`. Default planner and compact files never overwrite user edits. Compact is reachable only through the leased main-agent action.
+- [Context] Preflight uses the conservative UTF-8 JSON byte estimate at 80% of `maxInputSize`, or `maxContextSize - maxOutputSize`. Missing metadata disables preflight. Provider context-limit errors do not compact or retry.
+- [Testing] Vitest uses local mock providers and HTTP servers. macOS runs Seatbelt enforcement tests.
 
 # Architecture
-```
+
+```text
 src/
-├── types.ts           # Message, Tool(+ToolContext), Decision, Effect, ChatProvider
-├── config.ts          # Config resolution; defaultSystemPrompt(tools, agentsMd)
-├── instructions.ts    # AGENTS.md discovery (global + git root→cwd), findGitRoot
+├── types.ts           # Message, Tool, Decision, Effect, ChatProvider
+├── config.ts          # Config resolution, provider and model aliases, system prompt
+├── context.ts         # Compact capability, token estimate, untrusted context envelope
+├── instructions.ts    # AGENTS.md discovery and git-root lookup
+├── fs-policy.ts       # Custom, secret, workspace, scratch, outside zones
+├── sandbox.ts         # Seatbelt and bubblewrap command wrappers
+├── persona.ts         # Persona files, planner/compact, parsing, persona tool
 ├── agent/
-│   ├── state.ts       # AgentState{messages,status} + reduce + isSendable (invariants)
-│   ├── loop.ts        # Agent: run → think(Decision) → act(effects); RunInterruptedError
-│   ├── scope.ts       # Scope: parent-linked abort (fork/abort/dispose)
-│   └── events.ts      # Domain AgentEvent (no UI semantics)
-├── provider/
-│   └── openai.ts      # OpenAIProvider: SSE parsing, signal cancellation, JSON fallback
-├── tools/
-│   └── index.ts       # read (64KiB cap), write, edit (unique match), bash (timeout+signal)
-├── session.ts         # SessionSnapshot v1 + latest.json checkpoint (hydrate/serialize)
-├── tui/
-│   └── index.ts       # AgentTui dual layout + BorderedBox/BareInput; derives UI from events
-├── cli.ts             # CLI entrypoint: flags, --continue, checkpoint observer
+│   ├── state.ts       # AgentState, StateEvent, reduce, sendability
+│   ├── loop.ts        # Think, act, ordered effects, interruption
+│   ├── scope.ts       # Parent-linked cancellation scopes
+│   └── events.ts      # Domain AgentEvent union
+├── provider/openai.ts # SSE parsing, reasoning, tool-call stitching
+├── tools/index.ts     # Policy-bound read, write, edit, bash, ask_user
+├── session.ts         # Versioned snapshot and latest checkpoint
+├── tui/index.ts       # Interactive and oneshot terminal layouts
+├── cli.ts             # Config, policy, sandbox, personas, runtime wiring
 └── index.ts           # Public library surface
-test/                  # vitest: agent, provider, tools, tui, instructions, config, state, scope, session
-tsconfig.test.json     # noEmit typecheck for test/
+test/                  # Vitest coverage for the modules and invariants
 ```

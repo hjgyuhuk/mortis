@@ -140,8 +140,8 @@ describe('state invariants (property-style)', () => {
         expect(isSendable(state)).toBe(true)
       }
       expect(structuredClone(state)).toEqual(state)
-      // Append-only: the old messages are always an exact prefix of the new
-      // ones — the property provider prefix caching relies on.
+      // Normal transitions append only. context_compacted is deliberately
+      // excluded: it is the sole irreversible replacement authority.
       expect(state.messages.length).toBeGreaterThanOrEqual(previous.messages.length)
       expect(state.messages.slice(0, previous.messages.length)).toEqual(previous.messages)
     }

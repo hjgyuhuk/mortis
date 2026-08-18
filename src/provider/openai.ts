@@ -12,6 +12,17 @@
 
 import type { ChatProvider, Message, StreamChunk, Tool, ToolCall } from '../types.js'
 
+/** A non-success HTTP response, preserving status for runtime recovery policy. */
+export class ProviderHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(`provider request failed (${status}): ${body}`)
+    this.name = 'ProviderHttpError'
+  }
+}
+
 export interface OpenAIProviderOptions {
   /** Base URL of the OpenAI-compatible endpoint, e.g. `https://api.openai.com/v1`. */
   baseUrl: string
@@ -237,7 +248,7 @@ export class OpenAIProvider implements ChatProvider {
 
     if (!response.ok) {
       const text = await response.text()
-      throw new Error(`provider request failed (${response.status}): ${text}`)
+      throw new ProviderHttpError(response.status, text)
     }
 
     const builder = new ToolCallBuilder()

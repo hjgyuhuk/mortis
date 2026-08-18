@@ -10,12 +10,34 @@
  * that to a user-facing notice.
  */
 
-import type { ChatProvider, Decision, Effect, Message, Tool, ToolCall } from '../types.js'
+import {
+  COMPACT_CONTEXT_TOOL,
+  compactableHistory,
+  compactContextTool,
+  shouldCompactContext,
+  type ContextRuntime,
+} from '../context.js'
+import type {
+  ChatProvider,
+  ContextCompactReason,
+  Decision,
+  Effect,
+  Message,
+  Tool,
+  ToolCall,
+} from '../types.js'
 import type { AgentEventListener } from './events.js'
 import { Scope } from './scope.js'
 import { initialState, reduce, type AgentState, type StateEvent } from './state.js'
 
 const DEFAULT_MAX_TURNS = 20
+
+/** A private, single-use authority. It is never serialized or shown to a model. */
+interface ContextLease {
+  readonly reason: ContextCompactReason
+  /** History at grant time; direct-action control calls never enter it. */
+  readonly history: readonly Message[]
+}
 
 /** The run was cancelled; the state was finalized and stays usable. */
 export class RunInterruptedError extends Error {
@@ -38,10 +60,42 @@ export interface AgentOptions {
   onEvent?: AgentEventListener
   /** Notified after every state transition; observers must not mutate state. */
   onTransition?: (state: AgentState) => void
+  /** Optional compact-persona dependency for lease-authorized compaction. */
+  context?: ContextRuntime
 }
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
+}
+
+/** Match only provider responses that explicitly report an input/context limit. */
+function isContextLimitError(error: unknown): error is Error {
+  if (!(error instanceof Error)) return false
+  const status = (error as Error & { status?: unknown }).status
+  if (status !== 400 && status !== 413) return false
+  return /context|token|maximum length|input length|too large|limit/i.test(error.message)
+}
+
+/** Add actionable guidance without dropping the provider's HTTP status. */
+function contextLimitGuidance(error: Error): Error {
+  const guided = new Error(
+    'provider rejected the context before main-agent compaction could run; configure model input limits and compact before the threshold: ' +
+    error.message,
+  )
+  const status = (error as Error & { status?: unknown }).status
+  if (typeof status === 'number') Object.assign(guided, { status })
+  return guided
+}
+
+/** Direct context actions accept no model-controlled input. */
+function isCompactContextCall(call: ToolCall): boolean {
+  if (call.function.name !== COMPACT_CONTEXT_TOOL) return false
+  try {
+    const args = JSON.parse(call.function.arguments) as unknown
+    return typeof args === 'object' && args !== null && !Array.isArray(args) && Object.keys(args).length === 0
+  } catch {
+    return false
+  }
 }
 
 /** Summarize tool arguments for events: single line, truncated. */
@@ -57,9 +111,13 @@ export class Agent {
   private readonly toolByName: Map<string, Tool>
   private readonly onEvent?: AgentEventListener
   private readonly onTransition?: (state: AgentState) => void
+  private readonly context?: ContextRuntime
   private readonly agentScope = new Scope()
   private state: AgentState
   private currentRun: Scope | null = null
+  private contextLease: ContextLease | null = null
+  /** Suppress a second threshold lease until ordinary State changes again. */
+  private thresholdCompactedState: AgentState | null = null
 
   constructor(options: AgentOptions) {
     this.provider = options.provider
@@ -68,6 +126,7 @@ export class Agent {
     this.toolByName = new Map(options.tools.map((tool) => [tool.name, tool]))
     this.onEvent = options.onEvent
     this.onTransition = options.onTransition
+    this.context = options.context
     this.state = options.state ?? initialState(options.systemPrompt)
   }
 
@@ -81,6 +140,38 @@ export class Agent {
     this.currentRun?.abort(reason)
   }
 
+  /**
+   * Let an interactive user request a lease. The main agent must authorize
+   * `compact_context`; the command itself never enters State.
+   */
+  async requestContextCompaction(): Promise<boolean> {
+    if (this.currentRun) throw new Error('cannot compact while an agent run is active')
+    if (!this.grantContextLease('manual')) return false
+
+    const scope = this.agentScope.fork()
+    this.currentRun = scope
+    try {
+      this.onEvent?.({ kind: 'model_request' })
+      const decision = await this.think(scope)
+      if (decision.type !== 'execute' || decision.effects.length !== 1 || decision.effects[0]!.kind !== 'context_compact') {
+        throw new Error('main agent did not authorize context compaction')
+      }
+      await this.act(decision.effects, scope)
+      return true
+    } catch (error) {
+      if (isAbortError(error)) {
+        const reason = scope.abortReason || 'cancelled'
+        this.onEvent?.({ kind: 'run_interrupted', reason })
+        throw new RunInterruptedError(reason)
+      }
+      throw error
+    } finally {
+      this.contextLease = null
+      this.currentRun = null
+      scope.dispose()
+    }
+  }
+
   /** Run one turn. Returns the assistant's final text answer. */
   async run(userMessage: string): Promise<string> {
     this.transition({ type: 'user_message', content: userMessage })
@@ -89,6 +180,7 @@ export class Agent {
     this.currentRun = runScope
     try {
       for (let turn = 0; turn < this.maxTurns; turn++) {
+        this.grantThresholdLease()
         this.onEvent?.({ kind: 'model_request' })
         const decision = await this.think(runScope)
 
@@ -116,8 +208,12 @@ export class Agent {
         this.onEvent?.({ kind: 'run_interrupted', reason })
         throw new RunInterruptedError(reason)
       }
+      if (isContextLimitError(error)) {
+        throw contextLimitGuidance(error)
+      }
       throw error
     } finally {
+      this.contextLease = null
       this.currentRun = null
       runScope.dispose()
     }
@@ -129,26 +225,82 @@ export class Agent {
     this.onTransition?.(this.state)
   }
 
+  /** Grant one private lease. Only this Agent can turn it into a direct Effect. */
+  private grantContextLease(reason: ContextCompactReason): boolean {
+    if (!this.context || this.contextLease) return false
+    const history = compactableHistory(this.state.messages)
+    if (history.length === 0) return false
+    this.contextLease = { reason, history }
+    return true
+  }
+
+  /** Start an automatic lease once per unchanged compacted state. */
+  private grantThresholdLease(): void {
+    if (!this.context || this.contextLease || this.state === this.thresholdCompactedState) return
+    if (shouldCompactContext(this.state.messages, this.tools, this.context.policy)) {
+      this.grantContextLease('threshold')
+    }
+  }
+
+  /** The provider sees only the authorized direct action while a lease exists. */
+  private toolsForRequest(): Tool[] {
+    return this.contextLease ? [compactContextTool()] : this.tools
+  }
+
+  /** Run the main-agent-authorized direct Effect and commit through the reducer. */
+  private async runContextCompactEffect(effect: Extract<Effect, { kind: 'context_compact' }>, scope: Scope): Promise<void> {
+    const lease = this.contextLease
+    const context = this.context
+    if (!lease || !context || lease.reason !== effect.reason) {
+      throw new Error('context compaction lease is absent or invalid')
+    }
+
+    this.onEvent?.({ kind: 'context_compacting', reason: lease.reason })
+    const summary = await context.compactor.compact(lease.history, scope.signal)
+    this.transition({ type: 'context_compacted', summary })
+    this.contextLease = null
+    if (effect.reason === 'threshold') this.thresholdCompactedState = this.state
+    this.onEvent?.({
+      kind: 'context_compacted',
+      reason: effect.reason,
+      removedMessages: lease.history.length,
+    })
+  }
+
   /**
    * Consume the next model response, record it, and classify it into a
    * decision. Text-only maps to finish; tool calls map to execute.
    */
   private async think(scope: Scope): Promise<Decision> {
     const messages: Message[] = [...this.state.messages]
+    const tools = this.toolsForRequest()
+    const directContextRequest = this.contextLease !== null
     let content = ''
     let thinking = ''
     let toolCalls: ToolCall[] = []
-    for await (const chunk of this.provider.completeStream(messages, this.tools, scope.signal)) {
+    for await (const chunk of this.provider.completeStream(messages, tools, scope.signal)) {
       if (chunk.kind === 'text') {
         content += chunk.delta
-        this.onEvent?.({ kind: 'assistant_text', content })
+        if (!directContextRequest) this.onEvent?.({ kind: 'assistant_text', content })
       } else if (chunk.kind === 'thinking') {
         // Reasoning is display-only: the wire format forbids sending it back
         // and a resume does not need it, so it never enters the state.
         thinking += chunk.delta
-        this.onEvent?.({ kind: 'assistant_thinking', content: thinking })
+        if (!directContextRequest) this.onEvent?.({ kind: 'assistant_thinking', content: thinking })
       } else {
         toolCalls = chunk.tool_calls
+      }
+    }
+
+    if (this.contextLease) {
+      if (toolCalls.length !== 1 || !isCompactContextCall(toolCalls[0]!)) {
+        throw new Error('context compaction lease requires one compact_context call with {} and no other tool calls')
+      }
+      // Direct actions are not conversation tool calls. Their effect replaces
+      // history atomically, so neither a tool call nor a tool result is stored.
+      return {
+        type: 'execute',
+        effects: [{ kind: 'context_compact', call: toolCalls[0]!, reason: this.contextLease.reason }],
       }
     }
 
@@ -169,6 +321,13 @@ export class Agent {
    * failure — it propagates so run() can finalize the state.
    */
   private async act(effects: Effect[], runScope: Scope): Promise<void> {
+    const contextEffect = effects.find((effect) => effect.kind === 'context_compact')
+    if (contextEffect) {
+      if (effects.length !== 1) throw new Error('context_compact cannot run with other effects')
+      await this.runContextCompactEffect(contextEffect, runScope)
+      return
+    }
+
     const settled = await Promise.allSettled(
       effects.map((effect) => this.runEffect(effect, runScope)),
     )

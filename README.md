@@ -8,7 +8,8 @@ No multi-session management, no complex scoping: just one runnable, testable, mi
 
 ## Highlights
 
-- **Side effects are the first-class concern**: a small state machine (`State → think → Decision → act → reduce`) where the reducer is the only mutation authority; tool calls run concurrently but commit in declaration order; history is append-only — deterministic, replayable, and prefix-cache friendly
+- **Side effects are the first-class concern**: a small state machine (`State → think → Decision → act → reduce`) where the reducer is the only mutation authority; tool calls run concurrently but commit in declaration order; normal history is append-only and prefix-cache friendly
+- **Bounded context**: the Agent grants a private lease, then the main agent authorizes `compact_context`. Its direct Effect preserves the system root and replaces all other history with one untrusted summary. Compact is irreversible and has no undo or revision store
 - **Full effect-lifecycle management**: parent-linked cancellation scopes (Agent > Run > Effect); Esc/Ctrl+C interrupt any run mid-flight, cancelling in-flight model requests and child processes while the session stays usable; interruption is a real state transition, not error handling
 - **Contained effects**: a five-zone filesystem policy (custom R/RW/DENY > secrets > workspace > scratch > outside) strictly enforced on read/write/edit, and bash runs inside an OS-generated sandbox (macOS Seatbelt / Linux bubblewrap) derived from the same policy
 - **Personas — cognition without side effects**: user-editable markdown cognitive roles in `~/.mortis/persona/*.md` that think and never act, returning structured evidence (Conclusion / Evidence / Proposal / Uncertainty / Effort); `/planner` hands the evidence to the main agent, which always asks the user before executing and writes the code itself
@@ -21,6 +22,7 @@ No multi-session management, no complex scoping: just one runnable, testable, mi
 src/
 ├── types.ts           # Message, Tool(+ToolContext), Decision, Effect, ChatProvider
 ├── config.ts          # Config resolution; defaultSystemPrompt(tools, agentsMd)
+├── context.ts         # Direct compact action, context estimate, untrusted record envelope
 ├── instructions.ts    # AGENTS.md discovery (global + git root→cwd)
 ├── agent/
 │   ├── state.ts       # AgentState + reduce() — the only mutation authority
@@ -82,10 +84,39 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 
 ```json
 {
-  "baseUrl": "http://localhost:11434/v1",
-  "model": "qwen2.5-coder",
-  "apiKey": "sk-...",
-  "thinkingEffort": "high",
+  "model": "longcat/longcat-2.0",
+  "providers": {
+    "longcat": {
+      "type": "openai",
+      "apiKey": "xxxxx",
+      "baseUrl": "https://api.longcat.chat/openai/v1"
+    },
+    "opencode": {
+      "type": "openai",
+      "apiKey": "xxxxx",
+      "baseUrl": "https://opencode.ai/zen/v1"
+    }
+  },
+  "models": {
+    "longcat/longcat-2.0": {
+      "provider": "longcat",
+      "model": "LongCat-2.0",
+      "maxContextSize": 1048576,
+      "maxOutputSize": 131072,
+      "capabilities": ["thinking", "tool_use"],
+      "displayName": "LongCat-2.0"
+    },
+    "opencode/gpt-5.5-pro": {
+      "provider": "opencode",
+      "model": "gpt-5.5-pro",
+      "maxContextSize": 1050000,
+      "maxInputSize": 922000,
+      "maxOutputSize": 128000,
+      "capabilities": ["image_in", "always_thinking", "tool_use"],
+      "displayName": "GPT-5.5 Pro",
+      "supportEfforts": ["medium", "high", "xhigh"]
+    }
+  },
   "filesystem": {
     "scratchDir": "/tmp",
     "rules": [
@@ -97,6 +128,15 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 }
 ```
 
+`providers` stores OpenAI-compatible connections. Each `models` key is a
+model alias that selects one provider and one literal model ID. Top-level
+`model` selects the main-agent alias. Persona frontmatter uses the same
+model aliases. A literal top-level model keeps the existing single-provider
+fallback fields: `baseUrl`, `apiKey`, and `thinkingEffort`.
+
+The file remains JSON. The TOML-style names `api_key`, `base_url`, and
+`max_context_size` map to `apiKey`, `baseUrl`, and `maxContextSize`.
+
 | Option | CLI flag | Env var | Default |
 |---|---|---|---|
 | Base URL | `--base-url` | `MORTIS_BASE_URL` | `https://api.openai.com/v1` |
@@ -104,6 +144,37 @@ pnpm dev --init --base-url http://localhost:11434/v1 --model qwen2.5-coder
 | API Key | `--api-key` | `MORTIS_API_KEY` | none |
 | Thinking effort | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | not sent |
 | TUI | `--plain` disables | — | enabled |
+
+## Context compact
+
+`compact_context` is the sole direct context replacement action. Before a
+normal model request, Mortis estimates `JSON({ messages, tools })` at two
+UTF-8 bytes per token. It grants the main agent a private, one-use lease when
+the estimate reaches 80% of the configured input limit:
+
+- Prefer a model alias `maxInputSize`.
+- Otherwise reserve `maxOutputSize` from `maxContextSize`.
+- Without either limit, do not preflight compact.
+
+Only a request with a lease exposes `compact_context`, with no arguments and
+no ordinary tools. The main agent must call it alone. Its direct Effect sends
+complete non-system history to the user-editable `compact` persona as JSON.
+The persona only returns summary data. It receives no lease, State, Effect, or
+replacement interface. The Agent then immediately commits `context_compacted`.
+The reducer keeps every leading system message and replaces the rest with one
+`<mortis-compacted-context>` user record. The root prompt treats this record
+as untrusted data, never as instructions.
+
+Mixed, missing, or malformed direct actions discard the lease without changing
+State. Persona errors, empty summaries, and cancellation do the same. A
+provider context-limit error reports the error directly. Configure model
+capacity metadata and compact before the threshold. Compact cannot be undone,
+old messages are not persisted, and no revision UI exists.
+
+In interactive mode, type `/compact` to request a manual lease before the
+threshold fires. The command itself does not enter history. On success the
+manual flow ends after its status record. An automatic flow continues the
+original task after compaction. Tools and personas cannot request compaction.
 
 ## Terminal UI
 
@@ -113,11 +184,12 @@ Built on pi-tui. **Enabled by default**; `--plain` is the only off switch:
 - **Esc interrupts the in-flight run immediately**: pending model requests and shell commands are cancelled and you are back in the input box; Ctrl+C interrupts too, and exits when idle
 - Transcript scrolling: mouse wheel / PageUp / PageDown / Home / End, auto-following new output; `Ctrl+Shift+F` full-text search; on exit the complete transcript is printed into the terminal's scrollback
 - **Thinking display**: model reasoning (`reasoning_content` / `reasoning` streams) shows as a live two-line preview above the input box while streaming, then settles into a gray `✻ thinking` block in the transcript; `--thinking-effort` controls reasoning effort
+- **Context compact status**: compact flows show status rows only. The compact persona's internal output never enters the transcript
 - **Ask-user panel (ask_user)**: the model can call the `ask_user` tool to ask you — a `✻ question` panel appears between the transcript and the input (markdown rendered, mouse-wheel scrollable) with `[ Approve ] [ Reject ] [ Revise ]` below; select with ↑/↓/←/→, confirm with Enter, Esc quick-rejects; on Revise the model wraps up and your next message is the correction; Ctrl+C interrupts the whole run
 - Tool calls within one turn **run concurrently**, commit in declaration order, and each row shows ✓ / ✗
 - A single prompt argument uses the main-screen streaming view: one row per tool call, ✓ and a result summary when done, final answer rendered as markdown
 
-Implementation: the agent emits **domain events** (`model_request` / `assistant_thinking` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`) via `onEvent`; `AgentTui` subscribes and derives all display concerns from them. Model and endpoint come from the resolved config only — no setup phase.
+Implementation: the agent emits **domain events** (`model_request` / `context_compacting` / `context_compacted` / `assistant_thinking` / `assistant_text` / `tool_start` / `tool_result` / `run_interrupted`) via `onEvent`; `AgentTui` subscribes and derives all display concerns from them. Model and endpoint come from the resolved config only — no setup phase.
 
 ## Architecture
 
@@ -135,7 +207,7 @@ Seven invariants (see [AGENTS.md](./AGENTS.md)):
 4. Effects may run concurrently; transitions are serial and deterministic — concurrent execution, ordered commit
 5. Scopes own effect lifetimes; every run cleans up (Agent > Run > Effect parent chain)
 6. The agent core knows no TUI, persistence, or runtime — they only observe state/events
-7. History is append-only — every event (including interrupt fill) only appends, so request prefixes stay byte-stable and provider prefix caching keeps hitting
+7. Normal history is append-only. The sole exception is an irreversible, main-agent-authorized `context_compacted` direct Effect, which keeps the system root and replaces all other messages with one untrusted user summary
 
 Consequences:
 
@@ -160,13 +232,13 @@ Effort      low | medium | high + expected scope
 
 In interactive mode, type `/planner <task>`: the persona thinks first (streamed, reasoning included), then the **evidence is handed to the main agent, which decides** — the planner only provides an overview (steps, files, signatures, edge cases — never full implementation code), the main agent **always confirms with ask_user before executing**, and the main agent always writes the code itself. It may also reject, consult the persona again (the `persona` tool), or gather more information first. Esc/Ctrl+C interrupt either phase.
 
-**Personas are user-editable markdown files** in `~/.mortis/persona/` (a default `planner.md` is created on first run and never overwritten). Format: frontmatter (`name` / `description`, optional `model` / `thinking-effort` overrides) + the system prompt as the body:
+**Personas are user-editable markdown files** in `~/.mortis/persona/` (default `planner.md` and `compact.md` files are created on first run and never overwritten). Format: frontmatter (`name` / `description`, optional `model` / `thinking-effort` overrides) + the system prompt as the body:
 
 ```markdown
 ---
 name: reviewer
 description: Reviews code changes for bugs and style.
-model: deepseek-chat        # optional: different model
+model: opencode/gpt-5.5-pro # optional: a config model alias or literal model
 thinking-effort: high       # optional: different reasoning effort
 ---
 
@@ -174,7 +246,11 @@ You are Reviewer, a cognitive persona invoked by the Mortis main agent.
 You think; you do not act. ...
 ```
 
-At startup every valid `*.md` in the directory is registered (broken files are skipped; a missing name falls back to the filename), and the model can consult any registered role through the `persona` tool (evidence enters conversation state as a tool result).
+When a persona uses an alias, it receives the referenced provider endpoint,
+API key, literal model, and model metadata. Persona frontmatter
+`thinking-effort` overrides the model default.
+
+At startup every valid `*.md` in the directory is registered (broken files are skipped; a missing name falls back to the filename). The model can consult ordinary roles through the `persona` tool. `compact` is only reachable through a leased main-agent `compact_context` action. It summarizes history but cannot replace it directly.
 
 ## Custom Providers
 

@@ -6,69 +6,92 @@ description: Sparse directed semantic graph of the codebase. Keep only important
 # Code Graph
 
 Agent
-├── owns → AgentState (via reduce only) + AgentScope
-├── runs → think() → Decision; act() → effects (Promise.allSettled, ordered commit)
-├── abort() → RunScope.abort → AbortError → run_interrupted → RunInterruptedError
-└── notifies → onEvent (domain) + onTransition (state observers)
+├── owns → AgentState + AgentScope
+├── runs → think() → Decision → act() → Effects
+├── grants → private ContextLease at threshold or `/compact`
+├── exposes → only `compact_context` while a lease is active
+├── runs → context_compact Effect → ContextCompactor → context_compacted
+├── commits → reduce(StateEvent) in declaration order
+├── aborts → RunScope → AbortError → run_interrupted
+└── notifies → AgentEvent and transition observers
 
-reduce / StateEvent
-├── only-mutation-of → AgentState{messages, status}
-├── derives → status from events (no transient fields)
-├── run_interrupted / awaiting_user → fill dangling tool calls (isSendable guarantee)
-└── tested-by → property-style invariant tests (seeded PRNG)
+AgentState / reduce
+├── owns → normal append-only Message history and derived status
+├── accepts → context_compacted → system root + untrusted summary
+├── fills → dangling tool calls on interruption or user wait
+└── tested-by → seeded invariant sequences
 
 Scope
-├── fork() → child (Agent > Run > Effect hierarchy)
-├── abort(reason) → propagates to descendants
-└── dispose() → detaches lifetime
-
-Decision ← think interprets model output
-├── respond / execute(effects) / wait / finish
-Effect
-└── tool_call (future: sub_agent, permission, sleep)
+├── forks → Agent, Run, and Effect child scopes
+├── propagates → abort to descendants
+└── disposes → lifetime links
 
 ChatProvider
 ├── implemented-by → OpenAIProvider
-└── returns → AsyncIterable<StreamChunk>; signal cancels (AbortError)
+└── returns → AsyncIterable<StreamChunk> with signal cancellation
 
 OpenAIProvider
-├── parses → SSE (ssePayloads, [DONE], \r\n, tail buffer)
-├── stitches → ToolCallBuilder (index fragments, null-id tolerance)
-└── falls-back → non-SSE JSON (array index as fragment index)
+├── parses → SSE and non-SSE JSON
+├── streams → text and thinking chunks
+└── stitches → fragmented tool calls by index
+
+ContextRuntime
+├── estimates → UTF-8 request JSON / 2 tokens
+├── supplies → compact persona summary data to Agent
+└── never → State replacement, lease creation, or provider-limit retry
+
+Config
+├── resolves → CLI, environment, file, and default settings
+├── selects → main-agent model alias or literal model
+├── expands → ModelConfig → ProviderConfig → ResolvedModel
+└── supplies → main-agent and persona provider settings
+
+FilesystemPolicy
+├── classifies → custom, secrets, workspace, scratch, and outside zones
+├── guards → read, write, and edit tools
+└── generates → sandbox writable and denied roots
+
+Sandbox
+├── wraps → bash with Seatbelt or bubblewrap
+└── falls-back → honest unsandboxed runtime warning
+
+Persona
+├── loads → `~/.mortis/persona/*.md`
+├── runs → one completion without tools
+├── parses → conclusion, evidence, proposal, uncertainty, and effort
+├── returns → evidence for the main agent or persona tool
+└── provides → lease-authorized compact summary data
+
+CLI
+├── builds → Config → ContextRuntime → FilesystemPolicy → Sandbox → bound Tools
+├── wires → Agent, TUI, Session, and transition checkpointing
+└── dispatches → `/planner`, lease-requesting `/compact`, and model-side `persona`
+
+Session
+├── serializes → SessionSnapshot{version:1}
+├── checkpoints → latest.json from transition observation
+└── resumes → `--continue` with status reset to idle
 
 AgentTui
-├── consumes → AgentEvent (domain only; derives spinner/truncation/markdown)
-├── dual-layout → interactive (TuiAltScreen) | oneshot (TuiMainScreen)
-├── interactive-tree → VStack[header, ScrollView(answers, follow:end), bottom(statusRow, multi-line Editor)]
-├── tool rows → Map<toolCallId, {row, summary}> (parallel interleave; ✓/✗)
-├── ctrl+c → busy ? onInterrupt(agent.abort) : exit
-└── exits → /q (editor.getText()), Ctrl+D
-
-Session (session.ts)
-├── serializeState/hydrateState → SessionSnapshot{version:1}
-├── checkpoint → saveSession latest.json (CLI onTransition observer)
-└── latestSession → --continue resume (status reset idle)
-
-Tool
-├── read → readFile, 64KiB truncation
-├── write → writeFile
-├── edit → unique-match replace
-└── bash → execFile, timeout s (120/600) + ToolContext.signal
-
-Config → CLI > env > file > defaults; persists baseUrl/model only
-loadAgentsMd → findGitRoot → root→leaf AGENTS.md → defaultSystemPrompt
+├── consumes → domain AgentEvent
+├── renders → transcript, reasoning, tool rows, and ask_user panel
+└── handles → multiline input, interrupt, search, scroll, and exit
 
 # Source Paths
 
 Agent / RunInterruptedError → src/agent/loop.ts
 AgentState / reduce / isSendable → src/agent/state.ts
-Scope        → src/agent/scope.ts
-AgentEvent   → src/agent/events.ts
+Scope → src/agent/scope.ts
+AgentEvent → src/agent/events.ts
+ContextRuntime / ContextCompactor → src/context.ts
 ChatProvider / Decision / Effect → src/types.ts
-OpenAIProvider → src/provider/openai.ts
-builtinTools   → src/tools/index.ts
-AgentTui       → src/tui/index.ts
-Session        → src/session.ts
-Config         → src/config.ts
-loadAgentsMd   → src/instructions.ts
-cli.ts         → src/cli.ts
+OpenAIProvider / ProviderHttpError → src/provider/openai.ts
+FilesystemPolicy → src/fs-policy.ts
+SandboxRunner → src/sandbox.ts
+PersonaDefinition / COMPACT / personaTool → src/persona.ts
+Config / ProviderConfig / ModelConfig / resolveModelRef → src/config.ts
+builtinTools / askUserTool → src/tools/index.ts
+Session → src/session.ts
+AgentTui → src/tui/index.ts
+loadAgentsMd → src/instructions.ts
+CLI wiring → src/cli.ts

@@ -1,3 +1,5 @@
+import type { ContextCompactReason } from '../types.js'
+
 /**
  * Domain events emitted by the agent loop.
  *
@@ -10,6 +12,10 @@
 /** A tool call began. */
 export type AgentEvent =
   | { kind: 'model_request' }
+  /** The Agent is asking the compact persona to summarize active history. */
+  | { kind: 'context_compacting'; reason: ContextCompactReason }
+  /** The reducer replaced non-system history with an untrusted summary record. */
+  | { kind: 'context_compacted'; reason: ContextCompactReason; removedMessages: number }
   /** Accumulated model reasoning so far, streamed before the answer. */
   | { kind: 'assistant_thinking'; content: string }
   /** Accumulated assistant text so far, as it streams in. */

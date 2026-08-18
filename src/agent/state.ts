@@ -8,14 +8,16 @@
  *
  * Invariants (see AGENTS.md):
  * - State is plain, serializable data.
- * - History is append-only: reduce() never modifies existing messages, so
- *   the request prefix stays byte-stable and provider prefix caching hits.
+ * - History is append-only except for `context_compacted`: that narrowly
+ *   authorized transition preserves the system root and replaces every other
+ *   message with one untrusted compacted-context record. It is irreversible.
  * - Any state whose status is not 'running' is directly sendable: every
  *   assistant tool_calls message has matching tool results. `run_interrupted`
  *   guarantees this by appending synthetic results for dangling calls — it is
  *   a real transition, not a repair helper.
  */
 
+import { compactableHistory, compactedContextMessage, rootSystemMessages } from '../context.js'
 import type { Message, ToolCall } from '../types.js'
 
 /** Coarse run status — the only runtime semantics State carries. */
@@ -48,6 +50,8 @@ export type StateEvent =
   | { type: 'run_interrupted'; reason: string }
   /** The run paused to wait for the user (e.g. a question or approval). */
   | { type: 'awaiting_user'; reason: string }
+  /** An authorized direct Effect compacted non-system history into one data record. */
+  | { type: 'context_compacted'; summary: string }
 
 /**
  * Append synthetic results for unanswered tool calls. Used by transitions
@@ -63,7 +67,7 @@ function withDanglingAnswered(messages: readonly Message[], note: string): Messa
 }
 
 /** Ids of assistant tool calls that have no matching tool message yet. */
-function collectDangling(messages: readonly Message[]): Set<string> {
+export function collectDangling(messages: readonly Message[]): Set<string> {
   const required = new Set<string>()
   for (const message of messages) {
     if (message.role === 'assistant' && message.tool_calls) {
@@ -117,6 +121,19 @@ export function reduce(state: AgentState, event: StateEvent): AgentState {
         ],
         status: 'awaiting_user',
       }
+    case 'context_compacted': {
+      if (collectDangling(state.messages).size > 0) {
+        throw new Error('context cannot compact while tool calls are pending')
+      }
+      const root = rootSystemMessages(state.messages)
+      if (compactableHistory(state.messages).length === 0) {
+        throw new Error('context has no non-system history to compact')
+      }
+      return {
+        messages: [...root, compactedContextMessage(event.summary)],
+        status: state.status,
+      }
+    }
   }
 }
 

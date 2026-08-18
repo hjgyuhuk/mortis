@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { Agent } from './agent/loop.js'
 import { OpenAIProvider } from './provider/openai.js'
 import { createBuiltinTools, askUserTool } from './tools/index.js'
-import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, writeFileConfig, type Config } from './config.js'
+import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, resolveModelRef, writeFileConfig, type Config, type ResolvedModel } from './config.js'
 import { AgentTui } from './tui/index.js'
 import { findGitRoot, loadAgentsMd } from './instructions.js'
 import { hydrateState, latestSession, saveSession, serializeState } from './session.js'
@@ -21,6 +21,11 @@ import { createSandbox } from './sandbox.js'
 import { ensureDefaultPersonas, loadPersonas, personaTool, runPersona, type PersonaDefinition } from './persona.js'
 import { Scope } from './agent/scope.js'
 import { RunInterruptedError } from './agent/loop.js'
+import {
+  compactionTask,
+  resolveInputTokenLimit,
+  type ContextRuntime,
+} from './context.js'
 
 function parseCliArgs(argv: string[]) {
   const parsed = parseArgs({
@@ -61,7 +66,7 @@ function usage(): string {
     '',
     'Options:',
     '  --base-url <url>   OpenAI-compatible base URL (env: MORTIS_BASE_URL)',
-    '  --model <name>     Model name (env: MORTIS_MODEL)',
+    '  --model <name>     Model alias or literal name (env: MORTIS_MODEL)',
     '  --api-key <key>    API key (env: MORTIS_API_KEY)',
     '  --thinking-effort <level>  Reasoning effort, sent as thinking_effort (env: MORTIS_THINKING_EFFORT)',
     '  --cwd <path>       Working directory for the agent',
@@ -75,6 +80,15 @@ function usage(): string {
     '  --init             Write a config file to ~/.mortis/config.json',
     '  -h, --help         Show this help',
   ].join('\n')
+}
+
+function createProvider(model: ResolvedModel, thinkingEffort = model.thinkingEffort): OpenAIProvider {
+  return new OpenAIProvider({
+    baseUrl: model.baseUrl,
+    model: model.model,
+    apiKey: model.apiKey,
+    thinkingEffort,
+  })
 }
 
 async function main() {
@@ -111,7 +125,35 @@ async function main() {
   })
   ensureFileConfig(config)
   ensureDefaultPersonas()
-  const provider = new OpenAIProvider(config)
+  const mainModel = resolveModelRef(undefined, config)
+  const provider = createProvider(mainModel)
+  const personas = loadPersonas()
+  // Persona model values select the same aliases as the main agent.
+  // Frontmatter thinkingEffort remains the most specific override.
+  const personaProvider = (persona: PersonaDefinition): OpenAIProvider => {
+    const ref = resolveModelRef(persona.model, config)
+    return createProvider(ref, persona.thinkingEffort ?? ref.thinkingEffort)
+  }
+  const compactPersona = personas['compact']
+  const context: ContextRuntime | undefined = compactPersona
+    ? {
+        policy: { maxInputTokens: resolveInputTokenLimit(mainModel) },
+        compactor: {
+          async compact(history, signal) {
+            const result = await runPersona(compactPersona, compactionTask(history), {
+              provider: personaProvider(compactPersona),
+              signal,
+            })
+            return result.raw
+          },
+        },
+      }
+    : undefined
+  // Compact is available only through the main agent's lease-authorized direct
+  // effect. It is never an ordinary model-side persona tool.
+  const callablePersonas = Object.fromEntries(
+    Object.entries(personas).filter(([name]) => name !== 'compact'),
+  ) as Record<string, PersonaDefinition>
   const useTui = !values.plain
   const agentsMd = loadAgentsMd(process.cwd())
 
@@ -146,31 +188,23 @@ async function main() {
   // from outside the agent core, so a crash loses at most one transition.
   const resumedState: AgentState | null = values.continue ? hydrateState(latestSession()) : null
   const checkpoint = (state: AgentState): void => {
-    saveSession(serializeState(state, config.model))
+    saveSession(serializeState(state, mainModel.alias))
   }
 
   // Interactive mode: `pnpm dev` with no prompt drops straight into the TUI,
   // where the prompt is typed in the input box. Model/provider come from the
   // resolved config only — no setup phase.
   if (useTui && !argPrompt) {
-    const tui = new AgentTui(config.model, config.baseUrl, {
+    const tui = new AgentTui(mainModel.displayName ?? mainModel.alias, mainModel.baseUrl, {
       interactive: true,
       resumed: resumedState !== null,
     })
     // Only the interactive TUI can answer questions, so ask_user exists here.
     // Personas are user-editable markdown files under ~/.mortis/persona.
-    const personas = loadPersonas()
-    const personaProvider = (persona: PersonaDefinition): OpenAIProvider =>
-      new OpenAIProvider({
-        baseUrl: config.baseUrl,
-        model: persona.model ?? config.model,
-        apiKey: config.apiKey,
-        thinkingEffort: persona.thinkingEffort ?? config.thinkingEffort,
-      })
     const interactiveTools = [
       ...tools,
       askUserTool((question, options) => tui.askUser(question, options)),
-      personaTool(personaProvider, personas),
+      personaTool(personaProvider, callablePersonas),
     ]
     const agent = new Agent({
       provider,
@@ -179,13 +213,27 @@ async function main() {
       state: resumedState ?? undefined,
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
+      context,
     })
 
     // Slash dispatch: /planner runs the planner persona, then hands the
-    // evidence to the main agent, which decides what to do; everything else
-    // is a normal agent run. Cancellation is unified across both phases.
+    // evidence to the main agent. /compact grants the main agent a one-shot
+    // direct action; everything else is a normal agent run. Cancellation is
+    // unified across all phases.
     let cancelCurrent: (() => void) | null = null
     const runPrompt = async (prompt: string): Promise<string> => {
+      if (prompt.trim() === '/compact') {
+        cancelCurrent = () => agent.abort('user interrupt')
+        try {
+          const compacted = await agent.requestContextCompaction()
+          if (compacted) return 'Context compacted. Previous context cannot be restored.'
+          return context
+            ? 'Context has no non-system history to compact.'
+            : 'Compact is unavailable because no valid compact persona is loaded.'
+        } finally {
+          cancelCurrent = null
+        }
+      }
       if (prompt.startsWith('/planner')) {
         const task = prompt.slice('/planner'.length).trim()
         const planner = personas['planner']
@@ -252,7 +300,7 @@ async function main() {
   }
 
   if (useTui) {
-    const tui = new AgentTui(config.model, config.baseUrl)
+    const tui = new AgentTui(mainModel.displayName ?? mainModel.alias, mainModel.baseUrl)
     tui.start()
     const agent = new Agent({
       provider,
@@ -261,6 +309,7 @@ async function main() {
       state: resumedState ?? undefined,
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
+      context,
     })
     try {
       const answer = await agent.run(prompt)
@@ -277,8 +326,9 @@ async function main() {
     systemPrompt: systemPromptFor(tools),
     state: resumedState ?? undefined,
     onTransition: checkpoint,
+    context,
   })
-  console.log(`mortis: talking to ${config.model} @ ${config.baseUrl}`)
+  console.log('mortis: talking to ' + (mainModel.displayName ?? mainModel.alias) + ' @ ' + mainModel.baseUrl)
   const answer = await agent.run(prompt)
   console.log(answer)
 }

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { configPath, ensureFileConfig, readFileConfig, resolveConfig, writeFileConfig } from '../src/config.js'
+import { configPath, ensureFileConfig, readFileConfig, resolveConfig, resolveModelRef, writeFileConfig } from '../src/config.js'
 
 const originalHome = process.env.HOME
 let home: string
@@ -114,5 +114,155 @@ describe('config', () => {
 
   it('builds configPath under ~/.mortis', () => {
     expect(configPath()).toBe(join(home, '.mortis', 'config.json'))
+  })
+})
+describe('provider and model aliases', () => {
+  const longcatAlias = 'longcat/longcat-2.0'
+  const opencodeAlias = 'opencode/gpt-5.5-pro'
+
+  function writeMultiProviderConfig(): void {
+    writeFileConfig({
+      model: longcatAlias,
+      apiKey: 'fallback-key',
+      providers: {
+        longcat: {
+          type: 'openai',
+          apiKey: 'longcat-key',
+          baseUrl: 'https://api.longcat.chat/openai/v1',
+        },
+        opencode: {
+          type: 'openai',
+          apiKey: 'opencode-key',
+          baseUrl: 'https://opencode.ai/zen/v1',
+        },
+      },
+      models: {
+        [longcatAlias]: {
+          provider: 'longcat',
+          model: 'LongCat-2.0',
+          maxContextSize: 1_048_576,
+          maxOutputSize: 131_072,
+          capabilities: ['thinking', 'tool_use'],
+          displayName: 'LongCat-2.0',
+        },
+        [opencodeAlias]: {
+          provider: 'opencode',
+          model: 'gpt-5.5-pro',
+          maxContextSize: 1_050_000,
+          maxInputSize: 922_000,
+          maxOutputSize: 128_000,
+          capabilities: ['image_in', 'always_thinking', 'tool_use'],
+          displayName: 'GPT-5.5 Pro',
+          supportEfforts: ['medium', 'high', 'xhigh'],
+        },
+      },
+    })
+  }
+
+  it('resolves the main-agent alias through its provider', () => {
+    writeMultiProviderConfig()
+    const config = resolveConfig()
+    expect(config.model).toBe(longcatAlias)
+    expect(resolveModelRef(undefined, config)).toMatchObject({
+      alias: longcatAlias,
+      provider: 'longcat',
+      type: 'openai',
+      baseUrl: 'https://api.longcat.chat/openai/v1',
+      model: 'LongCat-2.0',
+      apiKey: 'longcat-key',
+      maxContextSize: 1_048_576,
+      maxOutputSize: 131_072,
+      capabilities: ['thinking', 'tool_use'],
+      displayName: 'LongCat-2.0',
+    })
+  })
+
+  it('resolves a persona model alias through its own provider', () => {
+    writeMultiProviderConfig()
+    const personaModel = resolveModelRef(opencodeAlias, resolveConfig())
+    expect(personaModel).toMatchObject({
+      alias: opencodeAlias,
+      provider: 'opencode',
+      baseUrl: 'https://opencode.ai/zen/v1',
+      model: 'gpt-5.5-pro',
+      apiKey: 'opencode-key',
+      maxContextSize: 1_050_000,
+      maxInputSize: 922_000,
+      maxOutputSize: 128_000,
+      capabilities: ['image_in', 'always_thinking', 'tool_use'],
+      displayName: 'GPT-5.5 Pro',
+      supportEfforts: ['medium', 'high', 'xhigh'],
+    })
+  })
+
+  it('CLI --model selects any configured model alias', () => {
+    writeMultiProviderConfig()
+    const config = resolveConfig({ model: opencodeAlias })
+    expect(config.model).toBe(opencodeAlias)
+    expect(resolveModelRef(undefined, config)).toMatchObject({
+      provider: 'opencode',
+      model: 'gpt-5.5-pro',
+    })
+  })
+
+  it('falls back to top-level settings for a literal model', () => {
+    const config = resolveConfig({
+      baseUrl: 'http://localhost:11434/v1',
+      model: 'qwen2.5-coder',
+      apiKey: 'local-key',
+      thinkingEffort: 'medium',
+    })
+    expect(resolveModelRef(undefined, config)).toEqual({
+      alias: 'qwen2.5-coder',
+      type: 'openai',
+      baseUrl: 'http://localhost:11434/v1',
+      model: 'qwen2.5-coder',
+      apiKey: 'local-key',
+      thinkingEffort: 'medium',
+    })
+  })
+
+  it('uses the top-level key when a provider does not define one', () => {
+    const config = resolveConfig({
+      model: 'remote',
+      apiKey: 'fallback-key',
+      providers: {
+        remote: { type: 'openai', baseUrl: 'https://api.example.com/v1' },
+      },
+      models: {
+        remote: { provider: 'remote', model: 'remote-model' },
+      },
+    })
+    expect(resolveModelRef(undefined, config)).toMatchObject({
+      apiKey: 'fallback-key',
+      baseUrl: 'https://api.example.com/v1',
+      model: 'remote-model',
+    })
+  })
+
+  it('rejects a model alias that references an unknown provider', () => {
+    const config = resolveConfig({
+      model: 'broken',
+      models: {
+        broken: { provider: 'missing', model: 'missing-model' },
+      },
+    })
+    expect(() => resolveModelRef(undefined, config)).toThrow('unknown provider')
+  })
+
+  it('does not auto-persist provider API keys', () => {
+    const config = resolveConfig({
+      model: 'remote',
+      providers: {
+        remote: { type: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: 'provider-secret' },
+      },
+      models: {
+        remote: { provider: 'remote', model: 'remote-model' },
+      },
+    })
+    ensureFileConfig(config)
+    expect(readFileConfig().providers).toEqual({
+      remote: { type: 'openai', baseUrl: 'https://api.example.com/v1' },
+    })
   })
 })
