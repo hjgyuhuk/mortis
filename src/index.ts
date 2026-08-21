@@ -6,19 +6,21 @@ export { Agent, RunInterruptedError, type AgentOptions } from './agent/loop.js'
 export type { AgentEvent, AgentEventListener } from './agent/events.js'
 export { initialState, reduce, isSendable, collectDangling, type AgentState, type AgentStatus, type StateEvent } from './agent/state.js'
 export {
-  COMPACT_CONTEXT_TOOL,
   COMPACTED_CONTEXT_START,
   COMPACTED_CONTEXT_END,
   DEFAULT_CONTEXT_TRIGGER_RATIO,
+  DEFAULT_KEEP_RECENT_MESSAGES,
+  buildCompactionTask,
   compactableHistory,
-  compactContextTool,
   compactedContextMessage,
   compactionTask,
   estimateContextTokens,
+  estimateTextTokens,
   resolveInputTokenLimit,
   rootSystemMessages,
   serializeCompactionHistory,
   shouldCompactContext,
+  splitCompactionHistory,
   type ContextCompactor,
   type ContextPolicy,
   type ContextRuntime,
@@ -80,6 +82,8 @@ export {
 export {
   hydrateState,
   latestSession,
+  preCompactArchivePath,
+  savePreCompactArchive,
   saveSession,
   serializeState,
   sessionsDir,

@@ -1,52 +1,39 @@
 /**
  * Context compaction primitives.
  *
- * Compaction is deliberately narrow. A private Agent lease lets the main
- * agent authorize the only direct Effect that can replace messages. That
- * Effect replaces complete non-system history with one untrusted record.
+ * Compaction is deliberately narrow. A private Agent lease lets the runtime
+ * authorize the only operation that can replace messages. The Agent runs it
+ * directly — no model round-trip — and the reducer commits the replacement.
  * There is no generic replace or restore operation.
  */
 
 import { Buffer } from 'node:buffer'
 import type { Message, Tool } from './types.js'
 
-export const COMPACT_CONTEXT_TOOL = 'compact_context'
-
 /** A persona-backed source of summary data. It cannot replace State. */
 export interface ContextCompactor {
-  /** Summarize the non-system history without mutating it. */
-  compact(history: readonly Message[], signal?: AbortSignal): Promise<string>
+  /** Summarize a prepared transcript task without mutating anything. */
+  compact(task: string, signal?: AbortSignal): Promise<string>
 }
 
 /** Runtime policy for automatic compacting. An absent limit disables preflight. */
 export interface ContextPolicy {
   readonly maxInputTokens?: number
   readonly triggerRatio?: number
+  /** Non-system messages kept verbatim at the tail; the prefix is summarized. */
+  readonly keepRecentMessages?: number
 }
 
 /** Agent-facing summary dependency. The Agent owns authorization and replacement. */
 export interface ContextRuntime {
   readonly policy: ContextPolicy
   readonly compactor: ContextCompactor
-}
-
-/** Provider-visible declaration for the Agent-owned direct context action. */
-export function compactContextTool(): Tool {
-  return {
-    name: COMPACT_CONTEXT_TOOL,
-    description:
-      'Compact the active conversation now. This action is available only while a runtime context lease is active. ' +
-      'Call it immediately and alone with an empty object. The Agent invokes the compact persona for data, then replaces non-system context directly.',
-    parameters: {
-      type: 'object',
-      properties: {},
-      additionalProperties: false,
-    },
-    // Agent classifies this name as a direct Effect before normal Tool execution.
-    async execute() {
-      return 'error: compact_context is an Agent direct action, not a normal tool'
-    },
-  }
+  /**
+   * Input token budget of the compact persona's own model. When set, the
+   * transcript task is truncated (oldest prefix messages dropped first) to
+   * fit; the persona request itself must not overflow.
+   */
+  readonly compactorTokenLimit?: number
 }
 
 /** Metadata required to derive a safe input limit from a configured model. */
@@ -57,6 +44,7 @@ export interface ModelContextLimits {
 }
 
 export const DEFAULT_CONTEXT_TRIGGER_RATIO = 0.8
+export const DEFAULT_KEEP_RECENT_MESSAGES = 8
 export const COMPACTED_CONTEXT_START = '<mortis-compacted-context>'
 export const COMPACTED_CONTEXT_END = '</mortis-compacted-context>'
 
@@ -108,6 +96,58 @@ export function compactionTask(history: readonly Message[]): string {
   ].join('\n')
 }
 
+/** Conservative token estimate for a plain-text prompt (two UTF-8 bytes per token). */
+export function estimateTextTokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 2)
+}
+
+/**
+ * Split non-system history into a summarized prefix and a verbatim kept
+ * tail. The cut only lands where no tool call is left unanswered, so the
+ * kept tail is sendable on its own once the summary precedes it.
+ */
+export function splitCompactionHistory(
+  history: readonly Message[],
+  keep = DEFAULT_KEEP_RECENT_MESSAGES,
+): { prefix: readonly Message[]; kept: readonly Message[] } {
+  const ideal = Math.max(history.length - keep, 0)
+  // selfContained[i]: history.slice(i) holds every result for its own calls.
+  let openCalls = 0
+  const selfContained: boolean[] = new Array(history.length + 1).fill(false)
+  selfContained[0] = true
+  for (let i = 0; i < history.length; i++) {
+    const message = history[i]!
+    if (message.role === 'assistant' && message.tool_calls) openCalls += message.tool_calls.length
+    if (message.role === 'tool') openCalls--
+    selfContained[i + 1] = openCalls === 0
+  }
+  let split = ideal
+  while (split > 0 && !selfContained[split]) split--
+  return { prefix: history.slice(0, split), kept: history.slice(split) }
+}
+
+/**
+ * Build the persona task, truncating the oldest prefix messages when the
+ * transcript would overflow the compact model's own input budget. Throws
+ * when even a single message cannot fit.
+ */
+export function buildCompactionTask(
+  prefix: readonly Message[],
+  tokenLimit?: number,
+): { task: string; dropped: number } {
+  let start = 0
+  while (true) {
+    const task = compactionTask(prefix.slice(start))
+    if (tokenLimit === undefined || estimateTextTokens(task) <= tokenLimit) {
+      return { task, dropped: start }
+    }
+    if (start >= prefix.length) {
+      throw new Error('compaction transcript exceeds the compact persona context limit even after truncation')
+    }
+    start++
+  }
+}
+
 /** Prefer an explicit input limit, then reserve output capacity from context. */
 export function resolveInputTokenLimit(limits: ModelContextLimits): number | undefined {
   if (isPositiveFinite(limits.maxInputSize)) return Math.floor(limits.maxInputSize)
@@ -134,16 +174,24 @@ export function estimateContextTokens(messages: readonly Message[], tools: reado
   return Math.ceil(Buffer.byteLength(json, 'utf8') / 2)
 }
 
-/** True when the configured threshold asks the runtime to compact. */
+/**
+ * True when the configured threshold asks the runtime to compact. A measured
+ * prompt-token count from the provider's last usage report wins over the
+ * byte estimate; it reflects the request just answered.
+ */
 export function shouldCompactContext(
   messages: readonly Message[],
   tools: readonly Tool[],
   policy: ContextPolicy,
+  measuredPromptTokens?: number,
 ): boolean {
   const limit = policy.maxInputTokens
   if (!isPositiveFinite(limit)) return false
   const trigger = validTriggerRatio(policy.triggerRatio)
-  return estimateContextTokens(messages, tools) >= limit * trigger
+  const tokens = isPositiveFinite(measuredPromptTokens)
+    ? measuredPromptTokens
+    : estimateContextTokens(messages, tools)
+  return tokens >= limit * trigger
 }
 
 function isPositiveFinite(value: number | undefined): value is number {

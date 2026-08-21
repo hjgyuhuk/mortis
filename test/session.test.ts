@@ -1,10 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   hydrateState,
   latestSession,
+  savePreCompactArchive,
   saveSession,
   serializeState,
   sessionsDir,
@@ -69,6 +70,20 @@ describe('saveSession / latestSession', () => {
     expect(loaded?.model).toBe('m')
     expect(loaded?.messages).toEqual(sampleState().messages)
     expect(hydrateState(loaded as SessionSnapshot)?.messages).toEqual(sampleState().messages)
+  })
+
+  it('leaves no temp file behind after an atomic save', () => {
+    saveSession(serializeState(sampleState(), 'm'))
+    expect(existsSync(join(sessionsDir(), 'latest.json.tmp'))).toBe(false)
+    expect(latestSession()).not.toBeNull()
+  })
+
+  it('archives pre-compact messages to a separate forensic file', () => {
+    const messages = sampleState().messages
+    savePreCompactArchive(messages, 'm')
+    expect(existsSync(join(sessionsDir(), 'latest.json'))).toBe(false)
+    const parsed: unknown = JSON.parse(readFileSync(join(sessionsDir(), 'latest.pre-compact.json'), 'utf8'))
+    expect(parsed).toMatchObject({ version: 1, model: 'm', messages })
   })
 
   it('returns null when no checkpoint exists', () => {

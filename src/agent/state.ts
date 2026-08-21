@@ -50,8 +50,11 @@ export type StateEvent =
   | { type: 'run_interrupted'; reason: string }
   /** The run paused to wait for the user (e.g. a question or approval). */
   | { type: 'awaiting_user'; reason: string }
-  /** An authorized direct Effect compacted non-system history into one data record. */
-  | { type: 'context_compacted'; summary: string }
+  /**
+   * The authorized runtime action compacted non-system history into one
+   * untrusted summary record followed by the verbatim kept tail.
+   */
+  | { type: 'context_compacted'; summary: string; kept?: readonly Message[] }
 
 /**
  * Append synthetic results for unanswered tool calls. Used by transitions
@@ -130,7 +133,7 @@ export function reduce(state: AgentState, event: StateEvent): AgentState {
         throw new Error('context has no non-system history to compact')
       }
       return {
-        messages: [...root, compactedContextMessage(event.summary)],
+        messages: [...root, compactedContextMessage(event.summary), ...(event.kept ?? [])],
         status: state.status,
       }
     }

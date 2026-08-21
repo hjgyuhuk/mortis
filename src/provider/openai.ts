@@ -32,6 +32,18 @@ export interface OpenAIProviderOptions {
   apiKey?: string
   /** Reasoning effort sent as `thinking_effort` when set (e.g. 'low' | 'medium' | 'high'). */
   thinkingEffort?: string
+  /**
+   * Retries for connection-phase failures (network errors, 429, 5xx),
+   * with exponential backoff honoring `Retry-After`. A stream that already
+   * started is never retried. Default 2; 0 disables.
+   */
+  maxRetries?: number
+  /**
+   * Connection-phase timeout in milliseconds. A timed-out request counts as
+   * a retryable failure; streaming is never cut off once headers arrive.
+   * 0 disables. Default 0.
+   */
+  timeoutMs?: number
 }
 
 interface WireMessage {
@@ -78,9 +90,56 @@ interface WireStreamChunk {
       tool_calls?: WireToolCall[]
     }
   }>
+  usage?: { prompt_tokens?: number }
 }
 
 const DONE_MARKER = '[DONE]'
+
+const DEFAULT_MAX_RETRIES = 2
+const RETRY_BASE_MS = 1000
+const RETRY_MAX_MS = 8000
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+/** A connection timeout, distinct from a caller cancellation (AbortError). */
+function timeoutError(ms: number): Error {
+  const error = new Error(`connection timed out after ${ms}ms`)
+  error.name = 'TimeoutError'
+  return error
+}
+
+/** Sleep for the backoff delay, rejecting with a standard AbortError on cancel. */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError())
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError())
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort)
+  })
+}
+
+/** Exponential backoff; a numeric Retry-After (seconds) wins when larger. */
+function retryDelay(attempt: number, retryAfter: string | null): number {
+  const backoff = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS)
+  const seconds = Number(retryAfter)
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.max(backoff, seconds * 1000)
+  }
+  return backoff
+}
 
 /** Translate our internal message to the wire shape. */
 function toWireMessage(message: Message): WireMessage {
@@ -218,12 +277,16 @@ export class OpenAIProvider implements ChatProvider {
   private readonly model: string
   private readonly apiKey?: string
   private readonly thinkingEffort?: string
+  private readonly maxRetries: number
+  private readonly timeoutMs: number
 
   constructor(options: OpenAIProviderOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
     this.model = options.model
     this.apiKey = options.apiKey
     this.thinkingEffort = options.thinkingEffort
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
+    this.timeoutMs = options.timeoutMs ?? 0
   }
 
   async *completeStream(messages: Message[], tools: Tool[], signal?: AbortSignal): AsyncGenerator<StreamChunk> {
@@ -235,28 +298,66 @@ export class OpenAIProvider implements ChatProvider {
     // OpenAI rejects an empty `tools` array, so only send it when non-empty.
     if (tools.length > 0) body['tools'] = tools.map(toWireTool)
     if (this.thinkingEffort) body['thinking_effort'] = this.thinkingEffort
+    // Ask the endpoint for real token usage; used to calibrate compaction.
+    body['stream_options'] = { include_usage: true }
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    })
+    // The caller's signal forwards to whichever attempt controller is live,
+    // including while the chosen response streams. Each attempt gets a fresh
+    // controller so an aborted attempt never poisons the next one. The
+    // per-attempt timer only arms the connection phase; it is cleared once
+    // headers arrive, so a started stream is never cut off by the timeout.
+    let current: AbortController | null = null
+    const onAbort = () => current?.abort()
+    signal?.addEventListener('abort', onAbort)
+    try {
+      let attempt = 0
+      let response: Response
+      while (true) {
+        const controller = new AbortController()
+        current = controller
+        const timer = this.timeoutMs > 0
+          ? setTimeout(() => controller.abort(timeoutError(this.timeoutMs)), this.timeoutMs)
+          : null
+        try {
+          response = await fetch(`${this.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          })
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') throw error
+          if (attempt >= this.maxRetries) throw error
+          attempt++
+          await delay(retryDelay(attempt, null), signal)
+          continue
+        } finally {
+          if (timer) clearTimeout(timer)
+        }
+        if (response.ok) break
+        const retryable = response.status === 429 || response.status >= 500
+        if (!retryable || attempt >= this.maxRetries) {
+          throw new ProviderHttpError(response.status, await response.text())
+        }
+        attempt++
+        await delay(retryDelay(attempt, response.headers.get('retry-after')), signal)
+      }
 
-    if (!response.ok) {
-      const text = await response.text()
-      throw new ProviderHttpError(response.status, text)
+      return yield* this.readStream(response, new ToolCallBuilder())
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
     }
+  }
 
-    const builder = new ToolCallBuilder()
+  /** Translate one OK response into StreamChunks (SSE or plain JSON). */
+  private async *readStream(response: Response, builder: ToolCallBuilder): AsyncGenerator<StreamChunk> {
     const contentType = response.headers.get('content-type') ?? ''
     if (contentType.toLowerCase().includes('text/event-stream')) {
       let yieldedText = false
       for await (const payload of ssePayloads(response)) {
-        signal?.throwIfAborted()
         let chunk: WireStreamChunk
         try {
           chunk = JSON.parse(payload) as WireStreamChunk
@@ -264,6 +365,10 @@ export class OpenAIProvider implements ChatProvider {
           throw new Error(`provider sent invalid SSE JSON: ${payload.slice(0, 200)}`)
         }
         const delta = chunk.choices?.[0]?.delta
+        const usage = chunk.usage?.prompt_tokens
+        if (usage != null && usage > 0) {
+          yield { kind: 'usage', promptTokens: usage }
+        }
         if (!delta) continue
         const reasoning = delta.reasoning_content ?? delta.reasoning
         if (reasoning) {
@@ -289,7 +394,12 @@ export class OpenAIProvider implements ChatProvider {
     // Non-SSE endpoint (e.g. a gateway that ignores `stream: true`): read the
     // whole JSON and translate one message as a single chunk.
     const data = (await response.json()) as {
+      usage?: { prompt_tokens?: number }
       choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null; tool_calls?: WireToolCall[] } }>
+    }
+    const usage = data.usage?.prompt_tokens
+    if (usage != null && usage > 0) {
+      yield { kind: 'usage', promptTokens: usage }
     }
     const message = data.choices?.[0]?.message
     if (message?.reasoning_content) {

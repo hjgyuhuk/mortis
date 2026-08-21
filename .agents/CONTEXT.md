@@ -20,27 +20,27 @@ description: Static system invariants, architecture.
 - [Determinism] Effects may run concurrently, but transitions commit serially in declaration order.
 - [Scope] Scope owns effect lifetime through the Agent > Run > Effect parent chain.
 - [Boundary] Agent Core knows no TUI, persistence, or concrete runtime.
-- [History] Normal conversation transitions append only. `context_compacted` is the sole irreversible replacement transition: it preserves the leading system root and replaces all other messages with one untrusted user record.
-- [Context] Agent grants a private one-use lease only at the capacity threshold or interactive `/compact`. Only that model request sees `compact_context`. Its single direct Effect invokes `ContextCompactor` and commits `context_compacted`. The persona receives only transcript data and never receives a lease, State, Effect, or replacement authority.
+- [History] Normal conversation transitions append only. `context_compacted` is the sole irreversible replacement transition: it preserves the leading system root, replaces the summarized prefix with one untrusted user record, and keeps a self-contained verbatim tail.
+- [Context] The Agent grants a private one-use lease only at the capacity threshold or interactive `/compact`, then executes compaction directly — no model round-trip. The persona receives only the prefix transcript (truncated to its own model budget) and never receives a lease, State, or replacement authority.
 - [Sendability] Any non-running state can be sent. Interrupt and user-wait transitions fill dangling tool calls.
 - [Persona] Personas think without tools. The main agent decides and executes.
 - [Types] TypeScript uses strict checking, `noUncheckedIndexedAccess`, NodeNext imports, and explicit wire types.
 - [Events] Domain events are concrete discriminated unions.
 - [Cancellation] AbortError maps to RunInterruptedError at the agent boundary and becomes a UI notice.
 - [Config] API keys never persist during automatic config creation. Explicit `--init` may write one.
-- [Snapshot] Session snapshots use version 1 and reject unknown versions.
+- [Snapshot] Session snapshots use version 1, reject unknown versions, and write atomically via a temp file plus rename.
 
 # Critical Environment & Boundaries
 
 - [Runtime] Node.js >=22.19.0 and pnpm 10.33.0.
-- [Provider] `OpenAIProvider` supports SSE and non-SSE JSON responses, and preserves non-success HTTP status in `ProviderHttpError`.
+- [Provider] `OpenAIProvider` supports SSE and non-SSE JSON responses, preserves non-success HTTP status in `ProviderHttpError`, and retries connection-phase failures (network, 429, 5xx) with backoff; a started stream never retries.
+- [Context] Preflight prefers the provider's last reported `prompt_tokens`, falling back to the conservative UTF-8 JSON byte estimate at 80% of `maxInputSize`, or `maxContextSize - maxOutputSize`. Missing metadata disables preflight. Provider context-limit errors do not compact or retry.
 - [TUI] Interactive mode uses pi-tui AltScreen with a scrolling transcript and multiline Editor.
 - [Filesystem] Read, write, and edit enforce FilesystemPolicy. Workspace and scratch are writable by default.
 - [Sandbox] Bash uses Seatbelt on macOS or bubblewrap on Linux when available. The CLI reports unsandboxed fallback honestly.
 - [Config] Config lives under `~/.mortis`. Resolution order is CLI > environment > file > defaults.
 - [Models] `providers` stores OpenAI-compatible connections. `models` maps aliases to providers, literal model IDs, and model metadata.
 - [Personas] Persona files live under `~/.mortis/persona/*.md`. Default planner and compact files never overwrite user edits. Compact is reachable only through the leased main-agent action.
-- [Context] Preflight uses the conservative UTF-8 JSON byte estimate at 80% of `maxInputSize`, or `maxContextSize - maxOutputSize`. Missing metadata disables preflight. Provider context-limit errors do not compact or retry.
 - [Testing] Vitest uses local mock providers and HTTP servers. macOS runs Seatbelt enforcement tests.
 
 # Architecture

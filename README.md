@@ -9,7 +9,7 @@ No multi-session management, no complex scoping: just one runnable, testable, mi
 ## Highlights
 
 - **Side effects are the first-class concern**: a small state machine (`State → think → Decision → act → reduce`) where the reducer is the only mutation authority; tool calls run concurrently but commit in declaration order; normal history is append-only and prefix-cache friendly
-- **Bounded context**: the Agent grants a private lease, then the main agent authorizes `compact_context`. Its direct Effect preserves the system root and replaces all other history with one untrusted summary. Compact is irreversible and has no undo or revision store
+- **Bounded context**: the Agent grants a private lease and executes compaction directly — no model round-trip. It summarizes a prefix into one untrusted record and keeps a verbatim recent tail. Compact is irreversible and has no undo or revision store; the replaced messages are archived to disk first
 - **Full effect-lifecycle management**: parent-linked cancellation scopes (Agent > Run > Effect); Esc/Ctrl+C interrupt any run mid-flight, cancelling in-flight model requests and child processes while the session stays usable; interruption is a real state transition, not error handling
 - **Contained effects**: a five-zone filesystem policy (custom R/RW/DENY > secrets > workspace > scratch > outside) strictly enforced on read/write/edit, and bash runs inside an OS-generated sandbox (macOS Seatbelt / Linux bubblewrap) derived from the same policy
 - **Personas — cognition without side effects**: user-editable markdown cognitive roles in `~/.mortis/persona/*.md` that think and never act, returning structured evidence (Conclusion / Evidence / Proposal / Uncertainty / Effort); `/planner` hands the evidence to the main agent, which always asks the user before executing and writes the code itself
@@ -147,34 +147,36 @@ The file remains JSON. The TOML-style names `api_key`, `base_url`, and
 
 ## Context compact
 
-`compact_context` is the sole direct context replacement action. Before a
-normal model request, Mortis estimates `JSON({ messages, tools })` at two
-UTF-8 bytes per token. It grants the main agent a private, one-use lease when
-the estimate reaches 80% of the configured input limit:
+Compaction is a runtime-owned direct action — never a model decision. Before
+a normal model request, Mortis checks capacity using the provider's last
+reported `prompt_tokens` when available, otherwise estimating
+`JSON({ messages, tools })` at two UTF-8 bytes per token. It grants a private,
+one-use lease when the estimate reaches 80% of the configured input limit:
 
 - Prefer a model alias `maxInputSize`.
 - Otherwise reserve `maxOutputSize` from `maxContextSize`.
 - Without either limit, do not preflight compact.
 
-Only a request with a lease exposes `compact_context`, with no arguments and
-no ordinary tools. The main agent must call it alone. Its direct Effect sends
-complete non-system history to the user-editable `compact` persona as JSON.
-The persona only returns summary data. It receives no lease, State, Effect, or
-replacement interface. The Agent then immediately commits `context_compacted`.
-The reducer keeps every leading system message and replaces the rest with one
-`<mortis-compacted-context>` user record. The root prompt treats this record
-as untrusted data, never as instructions.
+The Agent then executes the compaction itself — no model round-trip. The
+leased history is split at the last safe boundary: the prefix goes to the
+user-editable `compact` persona as JSON (truncated oldest-first to fit the
+compact model's own input budget); the most recent messages (default 8,
+`keepRecentMessages`) stay verbatim. The persona only returns summary data.
+It receives no lease, State, or replacement interface. The reducer commits
+`context_compacted`: every leading system message is kept, the prefix becomes
+one `<mortis-compacted-context>` user record, and the kept tail follows it.
+The root prompt treats this record as untrusted data, never as instructions.
 
-Mixed, missing, or malformed direct actions discard the lease without changing
-State. Persona errors, empty summaries, and cancellation do the same. A
-provider context-limit error reports the error directly. Configure model
-capacity metadata and compact before the threshold. Compact cannot be undone,
-old messages are not persisted, and no revision UI exists.
+Persona errors, empty summaries, and cancellation discard the lease without
+changing State. A provider context-limit error reports the error directly.
+Configure model capacity metadata and compact before the threshold. Compact
+cannot be undone and no revision UI exists; before each commit the replaced
+messages are archived to `~/.mortis/sessions/latest.pre-compact.json`.
 
-In interactive mode, type `/compact` to request a manual lease before the
-threshold fires. The command itself does not enter history. On success the
-manual flow ends after its status record. An automatic flow continues the
-original task after compaction. Tools and personas cannot request compaction.
+In interactive mode, type `/compact` to compact manually before the threshold
+fires. The command itself does not enter history. An automatic flow continues
+the original task after compaction. Tools and personas cannot request
+compaction.
 
 ## Terminal UI
 
@@ -250,7 +252,7 @@ When a persona uses an alias, it receives the referenced provider endpoint,
 API key, literal model, and model metadata. Persona frontmatter
 `thinking-effort` overrides the model default.
 
-At startup every valid `*.md` in the directory is registered (broken files are skipped; a missing name falls back to the filename). The model can consult ordinary roles through the `persona` tool. `compact` is only reachable through a leased main-agent `compact_context` action. It summarizes history but cannot replace it directly.
+At startup every valid `*.md` in the directory is registered (broken files are skipped; a missing name falls back to the filename). The model can consult ordinary roles through the `persona` tool. `compact` is only reachable through the Agent's leased direct compaction action. It summarizes history but cannot replace it directly.
 
 ## Custom Providers
 

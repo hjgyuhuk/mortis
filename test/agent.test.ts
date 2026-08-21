@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { rmSync } from 'node:fs'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Agent } from '../src/agent/loop.js'
 import { initialState, isSendable, reduce } from '../src/agent/state.js'
 import { askUserTool } from '../src/tools/index.js'
@@ -383,5 +387,42 @@ describe('Agent loop', () => {
     expect(provider.calls[0]?.[1]).toEqual({ role: 'user', content: 'earlier' })
     expect(provider.calls[0]?.[2]).toEqual({ role: 'assistant', content: 'prior answer' })
     expect(provider.calls[0]?.[3]).toEqual({ role: 'user', content: 'continue' })
+  })
+
+  it('serializes same-path writes so read-modify-write cannot lose updates', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mortis-agent-serialize-'))
+    const path = join(dir, 'counter.txt')
+    await writeFile(path, '')
+    try {
+      // Simulates edit's read → (delay) → write cycle on one file.
+      const racyWrite: Tool = {
+        name: 'write',
+        description: '',
+        parameters: { type: 'object', properties: {} },
+        async execute(args) {
+          const current = await readFile(path, 'utf8')
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          await writeFile(path, current + String(args.content))
+          return 'ok'
+        },
+      }
+      const provider = new ScriptedProvider([
+        {
+          kind: 'tool_calls',
+          tool_calls: [
+            makeCall('call_1', 'write', JSON.stringify({ path, content: 'x' })),
+            makeCall('call_2', 'write', JSON.stringify({ path, content: 'z' })),
+          ],
+        },
+        { kind: 'text', content: 'done' },
+      ])
+      const agent = new Agent({ provider, tools: [racyWrite], systemPrompt: 'sys' })
+
+      await agent.run('append twice')
+
+      expect(await readFile(path, 'utf8')).toBe('xz')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

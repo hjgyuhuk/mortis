@@ -150,12 +150,7 @@ export class FilesystemPolicy {
 
   /** Which zone does a path fall into? */
   classify(path: string): Zone {
-    const target = canonical(path)
-    if (this.matchRule(target)) return 'custom'
-    if (this.secrets.some((secret) => isUnder(target, secret))) return 'secrets'
-    if (isUnder(target, this.workspaceRoot)) return 'workspace'
-    if (isUnder(target, this.scratchRoot)) return 'scratch'
-    return 'outside'
+    return this.classifyCanonical(canonical(path))
   }
 
   /**
@@ -186,7 +181,7 @@ export class FilesystemPolicy {
       }
     }
 
-    const zone = this.classify(target)
+    const zone = this.classifyCanonical(target)
     const access: Access = zone === 'secrets' ? 'deny' : zone === 'outside' ? 'r' : 'rw'
     const allowed = access === 'rw' || (access === 'r' && intent === 'read')
     return { allowed, zone, access, reason: allowed ? undefined : this.denial(path, intent, zone, access) }
@@ -214,6 +209,15 @@ export class FilesystemPolicy {
 
   private matchRule(target: string): { path: string; access: Access } | undefined {
     return this.rules.find((rule) => isUnder(target, rule.path))
+  }
+
+  /** Zone of an already-canonical path — no repeated realpath walk. */
+  private classifyCanonical(target: string): Zone {
+    if (this.matchRule(target)) return 'custom'
+    if (this.secrets.some((secret) => isUnder(target, secret))) return 'secrets'
+    if (isUnder(target, this.workspaceRoot)) return 'workspace'
+    if (isUnder(target, this.scratchRoot)) return 'scratch'
+    return 'outside'
   }
 
   private denial(path: string, intent: Intent, zone: Zone, access: Access): string {

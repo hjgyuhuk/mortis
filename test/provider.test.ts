@@ -331,4 +331,87 @@ describe('OpenAIProvider', () => {
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
   }, 5000)
+
+  it('retries 5xx failures with backoff and succeeds', async () => {
+    let requests = 0
+    const { url } = await openServer((_req, res) => {
+      requests++
+      if (requests < 3) {
+        res.statusCode = 503
+        res.end('overloaded')
+        return
+      }
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.end(sse([{ choices: [{ delta: { content: 'ok' } }] }]))
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(chunks).toEqual([{ kind: 'text', delta: 'ok' }])
+    expect(requests).toBe(3)
+  }, 15000)
+
+  it('does not retry non-retryable 4xx errors', async () => {
+    let requests = 0
+    const { url } = await openServer((_req, res) => {
+      requests++
+      res.statusCode = 401
+      res.end('bad key')
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    await expect(collect(provider.completeStream([{ role: 'user', content: 'hi' }], [])))
+      .rejects.toMatchObject({ status: 401 })
+    expect(requests).toBe(1)
+  })
+
+  it('times out a stalled connection and retries', async () => {
+    let requests = 0
+    const { url } = await openServer((_req, res) => {
+      requests++
+      // Stall: never respond.
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm', timeoutMs: 50, maxRetries: 1 })
+    await expect(collect(provider.completeStream([{ role: 'user', content: 'hi' }], [])))
+      .rejects.toThrow('connection timed out')
+    expect(requests).toBe(2)
+  }, 5000)
+
+  it('emits a usage chunk from the SSE usage payload', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.end(sse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [], usage: { prompt_tokens: 42 } },
+      ]))
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(chunks).toEqual([
+      { kind: 'text', delta: 'ok' },
+      { kind: 'usage', promptTokens: 42 },
+    ])
+  })
+
+  it('emits a usage chunk from a non-SSE JSON response', async () => {
+    const { url } = await openServer((_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({
+        usage: { prompt_tokens: 7 },
+        choices: [{ message: { content: 'plain reply' } }],
+      }))
+    })
+
+    const provider = new OpenAIProvider({ baseUrl: url, model: 'm' })
+    const chunks = await collect(provider.completeStream([{ role: 'user', content: 'hi' }], []))
+
+    expect(chunks).toEqual([
+      { kind: 'usage', promptTokens: 7 },
+      { kind: 'text', delta: 'plain reply' },
+    ])
+  })
 })

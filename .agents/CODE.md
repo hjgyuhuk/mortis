@@ -8,9 +8,9 @@ description: Sparse directed semantic graph of the codebase. Keep only important
 Agent
 ├── owns → AgentState + AgentScope
 ├── runs → think() → Decision → act() → Effects
+├── serializes → same-path write/edit effects; others run concurrently
 ├── grants → private ContextLease at threshold or `/compact`
-├── exposes → only `compact_context` while a lease is active
-├── runs → context_compact Effect → ContextCompactor → context_compacted
+├── executes → compaction directly (no model round-trip), single commit site
 ├── commits → reduce(StateEvent) in declaration order
 ├── aborts → RunScope → AbortError → run_interrupted
 └── notifies → AgentEvent and transition observers
@@ -33,10 +33,14 @@ ChatProvider
 OpenAIProvider
 ├── parses → SSE and non-SSE JSON
 ├── streams → text and thinking chunks
-└── stitches → fragmented tool calls by index
+├── stitches → fragmented tool calls by index
+├── retries → connection-phase network / 429 / 5xx failures with backoff
+└── reports → usage chunk carrying the endpoint's prompt_tokens
 
 ContextRuntime
-├── estimates → UTF-8 request JSON / 2 tokens
+├── estimates → measured prompt_tokens, else UTF-8 request JSON / 2 tokens
+├── splits → history into summarized prefix + self-contained kept tail
+├── truncates → the persona transcript to the compact model's own budget
 ├── supplies → compact persona summary data to Agent
 └── never → State replacement, lease creation, or provider-limit retry
 
@@ -69,7 +73,8 @@ CLI
 
 Session
 ├── serializes → SessionSnapshot{version:1}
-├── checkpoints → latest.json from transition observation
+├── checkpoints → latest.json atomically (temp file + rename)
+├── archives → latest.pre-compact.json before each compaction commit
 └── resumes → `--continue` with status reset to idle
 
 AgentTui

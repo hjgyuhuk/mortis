@@ -9,7 +9,7 @@
 ## 特性
 
 - **副作用是一等公民**：小状态机内核（`State → think → Decision → act → reduce`），reducer 是唯一的状态变换点；工具并发执行、按声明顺序提交；普通历史只追加，前缀缓存友好
-- **受限 Context**：Agent 授予私有 lease，再由 Main Agent 授权 `compact_context`。它的 direct Effect 保留 system 根消息，并把其余历史替换为非信任摘要。compact 不可撤销，也不保存 revision
+- **受限 Context**：Agent 授予私有 lease 后直接执行 compact，无模型往返。前缀替换为非信任摘要，最近消息原样保留。compact 不可撤销，也不保存 revision；提交前被替换消息先存档到磁盘
 - **完整的 Effect 生命周期管理**：父链取消 Scope（Agent > Run > Effect）；Esc/Ctrl+C 随时中断运行中的回合，在飞的模型请求与子进程一并取消、会话保持可用；中断是正式的状态转移而非异常处理
 - **受约束的副作用**：五区文件系统权限（custom R/RW/DENY > secrets > workspace > scratch > outside）对 read/write/edit 严格执法；bash 运行在由同一策略生成的 OS 沙箱内（macOS Seatbelt / Linux bubblewrap）
 - **Persona——无副作用的认知**：`~/.mortis/persona/*.md` 用户可编辑的认知角色，只思考不行动，输出结构化 Evidence（Conclusion / Evidence / Proposal / Uncertainty / Effort）；`/planner` 把 Evidence 交给 Main Agent，执行前必先询问用户，代码也总是由 Main Agent 编写
@@ -146,30 +146,30 @@ Persona frontmatter 使用相同模型别名。顶层 `model` 写实际模型时
 
 ## Context Compact
 
-`compact_context` 是唯一可替换 context 的 direct action。每次普通模型请求前，
-Mortis 按 `JSON({ messages, tools })` 的 UTF-8 字节数除以二估算 token。估算值
-达到输入上限的 80% 时，Agent 向 Main Agent 授予一次私有 lease：
+Compact 是运行时直执行的 direct action，不是模型决策。每次普通模型请求前，
+Mortis 优先使用 provider 上次上报的 `prompt_tokens`，缺少时按
+`JSON({ messages, tools })` 的 UTF-8 字节数除以二估算 token。估算值
+达到输入上限的 80% 时，Agent 创建一次私有 lease：
 
 - 优先使用模型别名的 `maxInputSize`。
 - 缺少它时，用 `maxContextSize - maxOutputSize`。
 - 两者都缺少时，不预先 compact。
 
-只有带 lease 的模型请求会看到无参数的 `compact_context`，并隐藏普通工具。
-Main Agent 必须单独调用它。它的 direct Effect 把完整非 system 历史以 JSON
-交给用户可编辑的 `compact` persona。Persona 只返回摘要数据，不接触 lease、
-State、Effect 或替换接口。随后 Agent 立刻提交 `context_compacted`。Reducer
-保留连续的根 system 消息，并把其余消息替换为一条
-`<mortis-compacted-context>` user 记录。根 prompt 把该记录当作非信任数据，
-不会执行其中指令。
+随后 Agent 直接执行 compact，无模型往返。lease 历史在最后一个安全边界切分：
+前缀以 JSON 交给用户可编辑的 `compact` persona（按 compact 模型自身的输入
+预算从最旧开始截断）；最近的消息（默认 8 条，`keepRecentMessages`）原样保留。
+Persona 只返回摘要数据，不接触 lease、State 或替换接口。Reducer 提交
+`context_compacted`：保留连续的根 system 消息，前缀替换为一条
+`<mortis-compacted-context>` user 记录，后接保留的原文尾部。根 prompt 把该
+记录当作非信任数据，不会执行其中指令。
 
-混合、缺失或参数错误的 direct action 会丢弃 lease，不修改 State。Persona
-报错、空摘要或取消也如此。供应商返回 context 超限错误时直接报错。请配置模型
-容量元数据，并在阈值前 compact。compact 后不能 undo，不保存旧消息，也没有
-revision UI。
+Persona 报错、空摘要或取消会丢弃 lease，不修改 State。供应商返回 context
+超限错误时直接报错。请配置模型容量元数据，并在阈值前 compact。compact 后
+不能 undo，也没有 revision UI；每次提交前，被替换的消息会存档到
+`~/.mortis/sessions/latest.pre-compact.json`。
 
-交互模式输入 `/compact` 可在阈值触发前请求手动 lease。该命令不会写入 Agent
-history。成功后手动流程结束并显示状态。自动流程 compact 后继续原任务。工具与
-Persona 都不能请求 compact。
+交互模式输入 `/compact` 可在阈值触发前手动 compact。该命令不会写入 Agent
+history。自动流程 compact 后继续原任务。工具与 Persona 都不能请求 compact。
 
 ## 终端 UI
 
@@ -244,7 +244,7 @@ You think; you do not act. ...
 Persona 使用别名时，会读取引用供应商的端点、API key、实际模型和模型元数据。
 frontmatter 的 `thinking-effort` 会覆盖模型默认值。
 
-系统启动时读取目录下全部 `*.md` 注册为可用 persona（坏文件跳过、name 缺省取文件名）。模型可经 `persona` 工具咨询普通角色。`compact` 只能经带 lease 的 Main Agent `compact_context` action 调用。它只能总结历史，不能直接替换 history。
+系统启动时读取目录下全部 `*.md` 注册为可用 persona（坏文件跳过、name 缺省取文件名）。模型可经 `persona` 工具咨询普通角色。`compact` 只能经 Agent 带 lease 的 direct compact action 调用。它只能总结历史，不能直接替换 history。
 
 ## 自定义供应商
 

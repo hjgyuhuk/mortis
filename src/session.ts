@@ -9,7 +9,7 @@
  * in flight.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Message } from './types.js'
@@ -61,11 +61,38 @@ export function hydrateState(snapshot: unknown): AgentState | null {
   return { messages: candidate.messages as Message[], status: 'idle' }
 }
 
-/** Overwrite the latest checkpoint on disk; returns the path written. */
+/** Overwrite the latest checkpoint on disk atomically; returns the path written. */
 export function saveSession(snapshot: SessionSnapshot): string {
+  return writeSnapshotAtomic(snapshotPath(), snapshot)
+}
+
+/** Path of the pre-compact forensic archive (one overwrite per compaction). */
+export function preCompactArchivePath(): string {
+  return join(sessionsDir(), 'latest.pre-compact.json')
+}
+
+/**
+ * Archive the messages a compaction is about to replace. Compaction is
+ * irreversible in State by design; this file is the only recovery artifact.
+ * One file, overwritten each time — no revision store.
+ */
+export function savePreCompactArchive(messages: readonly Message[], model: string): string {
+  const snapshot: SessionSnapshot = {
+    version: SNAPSHOT_VERSION,
+    model,
+    messages: [...messages],
+    savedAt: new Date().toISOString(),
+  }
+  return writeSnapshotAtomic(preCompactArchivePath(), snapshot)
+}
+
+function writeSnapshotAtomic(path: string, snapshot: SessionSnapshot): string {
   mkdirSync(sessionsDir(), { recursive: true })
-  const path = snapshotPath()
-  writeFileSync(path, JSON.stringify(snapshot, null, 2) + '\n')
+  // Write to a sibling temp file, then rename: a crash mid-write can never
+  // leave a truncated JSON file behind.
+  const temp = path + '.tmp'
+  writeFileSync(temp, JSON.stringify(snapshot, null, 2) + '\n')
+  renameSync(temp, path)
   return path
 }
 

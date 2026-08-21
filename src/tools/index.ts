@@ -20,6 +20,12 @@ const execFileAsync = promisify(execFile)
 /** Cap tool output so a single call cannot flood the model's context. */
 const READ_MAX_CHARS = 64 * 1024
 
+/** Truncate any tool output to the same cap, with a visible notice. */
+function truncateOutput(text: string, max = READ_MAX_CHARS): string {
+  if (text.length <= max) return text
+  return text.slice(0, max) + `\n... (truncated: showing the first ${max} of ${text.length} characters)`
+}
+
 /** Default shell command timeout, in seconds. */
 const BASH_DEFAULT_TIMEOUT_S = 120
 const BASH_MAX_TIMEOUT_S = 600
@@ -54,15 +60,18 @@ function deny(decision: PolicyDecision): string {
   return `error: ${decision.reason ?? 'permission denied'}`
 }
 
-/** Read a file's contents, truncated to READ_MAX_CHARS. */
+/** Read a file's contents as numbered lines, paged by offset. */
 export function readTool(policy: FilesystemPolicy): Tool {
   return {
     name: 'read',
-    description: 'Read the contents of a file (truncated beyond 64 KiB). Denied paths are rejected.',
+    description:
+      'Read a file as numbered lines (line-number prefix per line). Pass offset (1-based line) to page ' +
+      'through large files. Output is truncated beyond 64 KiB. Denied paths are rejected.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to the file to read.' },
+        offset: { type: 'number', description: '1-based line number to start reading from (default 1).' },
       },
       required: ['path'],
     },
@@ -72,11 +81,13 @@ export function readTool(policy: FilesystemPolicy): Tool {
       if (!decision.allowed) return deny(decision)
       try {
         const content = await readFile(path, 'utf8')
-        if (content.length <= READ_MAX_CHARS) return content
-        return (
-          content.slice(0, READ_MAX_CHARS) +
-          `\n... (truncated: showing the first ${READ_MAX_CHARS} of ${content.length} characters)`
-        )
+        const startLine = Math.max(Math.floor(Number(args.offset ?? 1)) || 1, 1)
+        const lines = content.split('\n').slice(startLine - 1)
+        const width = String(lines.length).length
+        const numbered = lines
+          .map((line, index) => `${String(startLine + index).padStart(width)}\t${line}`)
+          .join('\n')
+        return truncateOutput(numbered)
       } catch (error) {
         return `error reading ${path}: ${(error as Error).message}`
       }
@@ -143,7 +154,8 @@ export function editTool(policy: FilesystemPolicy): Tool {
         if (matches > 1) {
           return `error: old_string matches ${matches} times in ${path}; add surrounding context to make it unique`
         }
-        const updated = content.replace(oldString, newString)
+        // A function replacement keeps `$&` and friends in newString literal.
+        const updated = content.replace(oldString, () => newString)
         await writeFile(path, updated, 'utf8')
         return `edited ${path}`
       } catch (error) {
@@ -187,10 +199,11 @@ export function bashTool(policy: FilesystemPolicy, sandbox?: SandboxRunner | nul
           signal: context?.signal,
         })
         const parts = [stdout, stderr].filter(Boolean)
-        return parts.join('\n') || '(no output)'
+        return truncateOutput(parts.join('\n')) || '(no output)'
       } catch (error) {
         const e = error as { stdout?: string; stderr?: string; message: string }
-        return `command failed: ${e.message}\n${e.stdout ?? ''}${e.stderr ?? ''}`
+        const output = truncateOutput([e.stdout, e.stderr].filter(Boolean).join(''))
+        return truncateOutput(`command failed: ${e.message}\n${output}`)
       }
     },
   }

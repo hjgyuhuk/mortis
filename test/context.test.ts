@@ -4,16 +4,19 @@ import { Agent, RunInterruptedError } from '../src/agent/loop.js'
 import {
   COMPACTED_CONTEXT_END,
   COMPACTED_CONTEXT_START,
+  buildCompactionTask,
   compactableHistory,
   compactedContextMessage,
   compactionTask,
   estimateContextTokens,
+  estimateTextTokens,
   resolveInputTokenLimit,
   rootSystemMessages,
   shouldCompactContext,
+  splitCompactionHistory,
   type ContextRuntime,
 } from '../src/context.js'
-import { initialState, reduce } from '../src/agent/state.js'
+import { collectDangling, initialState, reduce } from '../src/agent/state.js'
 import type { ChatProvider, Message, ModelResponse, StreamChunk, Tool, ToolCall } from '../src/types.js'
 
 const call: ToolCall = {
@@ -37,10 +40,12 @@ function textProvider(
 function contextRuntime(
   compact: ContextRuntime['compactor']['compact'],
   maxInputTokens?: number,
+  options: { keep?: number; tokenLimit?: number } = {},
 ): ContextRuntime {
   return {
-    policy: { maxInputTokens },
+    policy: { maxInputTokens, keepRecentMessages: options.keep },
     compactor: { compact },
+    compactorTokenLimit: options.tokenLimit,
   }
 }
 
@@ -67,8 +72,16 @@ function scriptedProvider(
   }
 }
 
-function compactCall(args = '{}'): ToolCall {
-  return { id: 'compact_1', type: 'function', function: { name: 'compact_context', arguments: args } }
+/** Provider that reports a measured prompt-token count before each answer. */
+function usageProvider(responses: Array<{ content: string; usage?: number }>): ChatProvider {
+  return {
+    async *completeStream(): AsyncGenerator<StreamChunk> {
+      const response = responses.shift()
+      if (!response) throw new Error('script exhausted')
+      if (response.usage) yield { kind: 'usage', promptTokens: response.usage }
+      yield { kind: 'text', delta: response.content }
+    },
+  }
 }
 
 describe('context primitives', () => {
@@ -106,7 +119,7 @@ describe('context primitives', () => {
 
   it('uses conservative UTF-8 JSON bytes and the 80 percent default threshold', () => {
     const messages: Message[] = [{ role: 'user', content: '中文 abc' }]
-    const tools = []
+    const tools: Tool[] = []
     const expected = Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools }), 'utf8') / 2)
     expect(estimateContextTokens(messages, tools)).toBe(expected)
     expect(shouldCompactContext(messages, tools, { maxInputTokens: Math.ceil(expected / 0.8) })).toBe(true)
@@ -115,28 +128,24 @@ describe('context primitives', () => {
   })
 })
 
-describe('main-agent-authorized context compaction', () => {
-  it('lets a manual request grant one lease without adding a command message', async () => {
-    const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
+describe('runtime-owned context compaction', () => {
+  it('compacts directly on a manual request without any model round-trip', async () => {
+    const calls: Message[][] = []
     const compact = vi.fn(async () => 'manual summary')
     const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'text', content: 'prior answer' },
-        { kind: 'tool_calls', tool_calls: [compactCall()] },
-      ], captures),
+      provider: textProvider('unused', calls),
       tools: [],
       systemPrompt: 'root',
-      context: contextRuntime(compact),
+      context: contextRuntime(compact, undefined, { keep: 0 }),
     })
 
     await agent.run('earlier request')
+    calls.length = 0
     await expect(agent.requestContextCompaction()).resolves.toBe(true)
 
-    expect(captures.tools[1]!.map((tool) => tool.name)).toEqual(['compact_context'])
-    expect(compact).toHaveBeenCalledWith([
-      { role: 'user', content: 'earlier request' },
-      { role: 'assistant', content: 'prior answer' },
-    ], expect.any(AbortSignal))
+    expect(compact).toHaveBeenCalledTimes(1)
+    expect(compact).toHaveBeenCalledWith(expect.stringContaining('earlier request'), expect.any(AbortSignal))
+    expect(calls).toHaveLength(0)
     expect(agent.snapshot.messages).toEqual([
       { role: 'system', content: 'root' },
       compactedContextMessage('manual summary'),
@@ -144,32 +153,26 @@ describe('main-agent-authorized context compaction', () => {
     expect(agent.snapshot.status).toBe('done')
   })
 
-  it('uses a threshold lease, then resumes the original task after the direct effect', async () => {
+  it('compacts at the threshold before the model request, then resumes the task', async () => {
     const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
     const compact = vi.fn(async () => '## Conclusion\nGoal: continue safely.')
     const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'tool_calls', tool_calls: [compactCall()] },
-        { kind: 'text', content: 'done' },
-      ], captures),
+      provider: scriptedProvider([{ kind: 'text', content: 'done' }], captures),
       tools: [],
       systemPrompt: 'root system',
-      context: contextRuntime(compact, 1),
+      context: contextRuntime(compact, 1, { keep: 0 }),
     })
 
     await expect(agent.run('original user request')).resolves.toBe('done')
-    expect(captures.tools[0]!.map((tool) => tool.name)).toEqual(['compact_context'])
+
+    expect(compact).toHaveBeenCalledTimes(1)
+    // The first model request already sees the compacted history, and no
+    // compact_context tool ever exists for the model.
     expect(captures.messages[0]).toEqual([
-      { role: 'system', content: 'root system' },
-      { role: 'user', content: 'original user request' },
-    ])
-    expect(compact.mock.calls[0]![0]).toEqual([{ role: 'user', content: 'original user request' }])
-    expect(captures.messages[1]).toEqual([
       { role: 'system', content: 'root system' },
       compactedContextMessage('## Conclusion\nGoal: continue safely.'),
     ])
-    expect(captures.tools[1]).toEqual([])
-    expect(compact).toHaveBeenCalledTimes(1)
+    expect(captures.tools[0]).toEqual([])
   })
 
   it('does not preflight compact when model capacity is absent', async () => {
@@ -202,61 +205,19 @@ describe('main-agent-authorized context compaction', () => {
     const error = await agent.run('original').catch((cause: unknown) => cause)
     expect(error).toMatchObject({ status: 413 })
     expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toContain('before main-agent compaction could run')
+    expect((error as Error).message).toContain('before runtime compaction could run')
     expect(compact).not.toHaveBeenCalled()
-  })
-
-  it('rejects mixed direct actions without replacing context', async () => {
-    const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
-    const compact = vi.fn(async () => 'summary')
-    const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'tool_calls', tool_calls: [compactCall(), { ...call, id: 'read_1' }] },
-      ], captures),
-      tools: [],
-      systemPrompt: 'root',
-      context: contextRuntime(compact, 1),
-    })
-
-    await expect(agent.run('original')).rejects.toThrow('requires one compact_context call')
-    expect(compact).not.toHaveBeenCalled()
-    expect(agent.snapshot.messages).toEqual([
-      { role: 'system', content: 'root' },
-      { role: 'user', content: 'original' },
-    ])
-  })
-
-  it('rejects a malformed direct action without replacing context', async () => {
-    const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
-    const compact = vi.fn(async () => 'summary')
-    const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'tool_calls', tool_calls: [compactCall('{"summary":"model controlled"}')] },
-      ], captures),
-      tools: [],
-      systemPrompt: 'root',
-      context: contextRuntime(compact, 1),
-    })
-
-    await expect(agent.run('original')).rejects.toThrow('requires one compact_context call')
-    expect(compact).not.toHaveBeenCalled()
-    expect(agent.snapshot.messages).toEqual([
-      { role: 'system', content: 'root' },
-      { role: 'user', content: 'original' },
-    ])
   })
 
   it('discards the lease when the compact persona fails', async () => {
-    const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
-    const compact = vi.fn(async () => { throw new Error('compact model unavailable') })
+    const compact = vi.fn(async (): Promise<string> => {
+      throw new Error('compact model unavailable')
+    })
     const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'text', content: 'prior answer' },
-        { kind: 'tool_calls', tool_calls: [compactCall()] },
-      ], captures),
+      provider: textProvider('prior answer'),
       tools: [],
       systemPrompt: 'root',
-      context: contextRuntime(compact),
+      context: contextRuntime(compact, undefined, { keep: 0 }),
     })
 
     await agent.run('original')
@@ -266,22 +227,24 @@ describe('main-agent-authorized context compaction', () => {
       { role: 'user', content: 'original' },
       { role: 'assistant', content: 'prior answer' },
     ])
+
+    compact.mockResolvedValueOnce('recovered summary')
+    await expect(agent.requestContextCompaction()).resolves.toBe(true)
+    expect(agent.snapshot.messages).toEqual([
+      { role: 'system', content: 'root' },
+      compactedContextMessage('recovered summary'),
+    ])
   })
 
   it('discards the lease when the compact persona returns an empty summary', async () => {
-    const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
     const compact = vi.fn()
       .mockResolvedValueOnce('   ')
       .mockResolvedValueOnce('recovered summary')
     const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'text', content: 'prior answer' },
-        { kind: 'tool_calls', tool_calls: [compactCall()] },
-        { kind: 'tool_calls', tool_calls: [compactCall()] },
-      ], captures),
+      provider: textProvider('prior answer'),
       tools: [],
       systemPrompt: 'root',
-      context: contextRuntime(compact),
+      context: contextRuntime(compact, undefined, { keep: 0 }),
     })
 
     await agent.run('original')
@@ -299,10 +262,9 @@ describe('main-agent-authorized context compaction', () => {
   })
 
   it('discards the lease when compacting is cancelled', async () => {
-    const captures = { messages: [] as Message[][], tools: [] as Array<Array<{ name: string }>> }
     let compactStarted!: () => void
     const started = new Promise<void>((resolve) => { compactStarted = resolve })
-    const compact = vi.fn((_history: readonly Message[], signal?: AbortSignal) => new Promise<string>((_resolve, reject) => {
+    const compact = vi.fn((_task: string, signal?: AbortSignal) => new Promise<string>((_resolve, reject) => {
       compactStarted()
       signal?.addEventListener('abort', () => {
         const error = new Error('cancelled')
@@ -311,13 +273,10 @@ describe('main-agent-authorized context compaction', () => {
       }, { once: true })
     }))
     const agent = new Agent({
-      provider: scriptedProvider([
-        { kind: 'text', content: 'prior answer' },
-        { kind: 'tool_calls', tool_calls: [compactCall()] },
-      ], captures),
+      provider: textProvider('prior answer'),
       tools: [],
       systemPrompt: 'root',
-      context: contextRuntime(compact),
+      context: contextRuntime(compact, undefined, { keep: 0 }),
     })
 
     await agent.run('original')
@@ -337,5 +296,121 @@ describe('main-agent-authorized context compaction', () => {
     state = reduce(state, { type: 'assistant_message', content: null, toolCalls: [call] })
     expect(() => reduce(state, { type: 'context_compacted', summary: 'summary' }))
       .toThrow('tool calls are pending')
+  })
+
+  it('prefers measured prompt tokens over the byte estimate', () => {
+    const policy = { maxInputTokens: 100 }
+    const tiny: Message[] = [{ role: 'user', content: 'hi' }]
+    expect(shouldCompactContext(tiny, [], policy)).toBe(false)
+    expect(shouldCompactContext(tiny, [], policy, 90)).toBe(true)
+    expect(shouldCompactContext(tiny, [], policy, 10)).toBe(false)
+  })
+
+  it('keeps a verbatim tail and commits it after the summary', () => {
+    const kept: Message[] = [
+      { role: 'user', content: 'recent question' },
+      { role: 'assistant', content: 'recent answer' },
+    ]
+    let state = reduce(initialState('root'), { type: 'user_message', content: 'old' })
+    state = reduce(state, { type: 'assistant_message', content: 'old answer' })
+    state = reduce(state, { type: 'user_message', content: 'recent question' })
+    state = reduce(state, { type: 'assistant_message', content: 'recent answer' })
+    state = reduce(state, { type: 'context_compacted', summary: 'summary', kept })
+
+    expect(state.messages).toEqual([
+      { role: 'system', content: 'root' },
+      compactedContextMessage('summary'),
+      ...kept,
+    ])
+  })
+
+  it('does not re-compact from stale measured tokens after a manual compaction', async () => {
+    const responses = [
+      { usage: 900, content: 'first answer' },
+      { content: 'second answer' },
+    ]
+    const compact = vi.fn(async () => 'summary')
+    const agent = new Agent({
+      provider: usageProvider(responses),
+      tools: [],
+      systemPrompt: 'root',
+      // Threshold 800: the first run finishes with a measured 900 but never
+      // crosses the check again; the manual compaction must clear it.
+      context: contextRuntime(compact, 1000, { keep: 0 }),
+    })
+
+    await agent.run('first')
+    await expect(agent.requestContextCompaction()).resolves.toBe(true)
+    const afterManual = compact.mock.calls.length
+
+    await agent.run('second')
+    expect(compact.mock.calls.length).toBe(afterManual)
+  })
+
+  it('hands the pre-compact messages to the archive observer', async () => {
+    const archived: Message[][] = []
+    const agent = new Agent({
+      provider: textProvider('answer'),
+      tools: [],
+      systemPrompt: 'root',
+      context: contextRuntime(vi.fn(async () => 'summary'), undefined, { keep: 0 }),
+      onBeforeCompact: (messages) => archived.push([...messages]),
+    })
+
+    await agent.run('original')
+    await expect(agent.requestContextCompaction()).resolves.toBe(true)
+
+    expect(archived).toEqual([[
+      { role: 'system', content: 'root' },
+      { role: 'user', content: 'original' },
+      { role: 'assistant', content: 'answer' },
+    ]])
+  })
+})
+
+describe('splitCompactionHistory', () => {
+  const history: Message[] = [
+    { role: 'user', content: 'q1' },
+    { role: 'assistant', content: null, tool_calls: [call] },
+    { role: 'tool', tool_call_id: 'call_1', content: 'result' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'q2' },
+    { role: 'assistant', content: null, tool_calls: [{ ...call, id: 'call_2' }] },
+    { role: 'tool', tool_call_id: 'call_2', content: 'result2' },
+  ]
+
+  it('only cuts where the kept tail is self-contained', () => {
+    // The ideal cut keeps 1 message but lands between call_2 and its
+    // result; the split walks back to the last safe boundary.
+    const { prefix, kept } = splitCompactionHistory(history, 1)
+    expect(prefix).toEqual(history.slice(0, 5))
+    expect(kept).toEqual(history.slice(5))
+    expect(collectDangling(kept).size).toBe(0)
+  })
+
+  it('keeps everything when the history is shorter than the tail budget', () => {
+    const { prefix, kept } = splitCompactionHistory(history, 100)
+    expect(prefix).toEqual([])
+    expect(kept).toEqual(history)
+  })
+})
+
+describe('buildCompactionTask', () => {
+  it('truncates the transcript to the persona token budget, oldest first', () => {
+    const prefix: Message[] = [
+      { role: 'user', content: 'x'.repeat(2000) },
+      { role: 'user', content: 'tail marker' },
+    ]
+    const limit = estimateTextTokens(compactionTask([prefix[1]!]))
+    const { task, dropped } = buildCompactionTask(prefix, limit)
+
+    expect(dropped).toBe(1)
+    expect(task).toContain('tail marker')
+    expect(task).not.toContain('xxx')
+  })
+
+  it('throws when even a single message cannot fit the budget', () => {
+    const prefix: Message[] = [{ role: 'user', content: 'x'.repeat(2000) }]
+    expect(() => buildCompactionTask(prefix, 1)).toThrow('exceeds the compact persona context limit')
   })
 })

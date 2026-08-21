@@ -14,15 +14,15 @@ import { createBuiltinTools, askUserTool } from './tools/index.js'
 import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, resolveModelRef, writeFileConfig, type Config, type ResolvedModel } from './config.js'
 import { AgentTui } from './tui/index.js'
 import { findGitRoot, loadAgentsMd } from './instructions.js'
-import { hydrateState, latestSession, saveSession, serializeState } from './session.js'
+import { hydrateState, latestSession, savePreCompactArchive, saveSession, serializeState } from './session.js'
 import type { AgentState } from './agent/state.js'
+import type { Message } from './types.js'
 import { FilesystemPolicy, mergeRules, parseRules, type FsRule } from './fs-policy.js'
 import { createSandbox } from './sandbox.js'
 import { ensureDefaultPersonas, loadPersonas, personaTool, runPersona, type PersonaDefinition } from './persona.js'
 import { Scope } from './agent/scope.js'
 import { RunInterruptedError } from './agent/loop.js'
 import {
-  compactionTask,
   resolveInputTokenLimit,
   type ContextRuntime,
 } from './context.js'
@@ -139,21 +139,27 @@ async function main() {
     ? {
         policy: { maxInputTokens: resolveInputTokenLimit(mainModel) },
         compactor: {
-          async compact(history, signal) {
-            const result = await runPersona(compactPersona, compactionTask(history), {
+          async compact(task, signal) {
+            const result = await runPersona(compactPersona, task, {
               provider: personaProvider(compactPersona),
               signal,
             })
             return result.raw
           },
         },
+        // The summary request must fit the compact persona's own model.
+        compactorTokenLimit: resolveInputTokenLimit(resolveModelRef(compactPersona.model, config)),
       }
     : undefined
-  // Compact is available only through the main agent's lease-authorized direct
-  // effect. It is never an ordinary model-side persona tool.
+  // Compact is a runtime-owned direct action, never an ordinary model-side
+  // persona tool.
   const callablePersonas = Object.fromEntries(
     Object.entries(personas).filter(([name]) => name !== 'compact'),
   ) as Record<string, PersonaDefinition>
+  // Compaction is irreversible in State; keep one forensic archive on disk.
+  const archiveBeforeCompact = (messages: readonly unknown[]): void => {
+    savePreCompactArchive(messages as Message[], mainModel.alias)
+  }
   const useTui = !values.plain
   const agentsMd = loadAgentsMd(process.cwd())
 
@@ -214,6 +220,7 @@ async function main() {
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
       context,
+      onBeforeCompact: archiveBeforeCompact,
     })
 
     // Slash dispatch: /planner runs the planner persona, then hands the
@@ -310,6 +317,7 @@ async function main() {
       onTransition: checkpoint,
       onEvent: (event) => tui.handle(event),
       context,
+      onBeforeCompact: archiveBeforeCompact,
     })
     try {
       const answer = await agent.run(prompt)
@@ -327,6 +335,7 @@ async function main() {
     state: resumedState ?? undefined,
     onTransition: checkpoint,
     context,
+    onBeforeCompact: archiveBeforeCompact,
   })
   console.log('mortis: talking to ' + (mainModel.displayName ?? mainModel.alias) + ' @ ' + mainModel.baseUrl)
   const answer = await agent.run(prompt)

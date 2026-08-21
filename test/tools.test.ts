@@ -27,10 +27,16 @@ afterEach(() => {
 })
 
 describe('read tool', () => {
-  it('returns file contents', async () => {
+  it('returns file contents as numbered lines', async () => {
     const path = join(tmp, 'a.txt')
     writeFileSync(path, 'hello')
-    expect(await readTool.execute({ path })).toBe('hello')
+    expect(await readTool.execute({ path })).toBe('1\thello')
+  })
+
+  it('pages from a 1-based line offset', async () => {
+    const path = join(tmp, 'lines.txt')
+    writeFileSync(path, 'one\ntwo\nthree')
+    expect(await readTool.execute({ path, offset: 2 })).toBe('2\ttwo\n3\tthree')
   })
 
   it('truncates files beyond 64 KiB', async () => {
@@ -52,7 +58,7 @@ describe('write tool', () => {
     const path = join(tmp, 'a.txt')
     expect(await writeTool.execute({ path, content: 'one' })).toContain('wrote')
     expect(await writeTool.execute({ path, content: 'two' })).toContain('wrote')
-    expect(await readTool.execute({ path })).toBe('two')
+    expect(await readTool.execute({ path })).toBe('1\ttwo')
   })
 })
 
@@ -61,7 +67,7 @@ describe('edit tool', () => {
     const path = join(tmp, 'a.txt')
     writeFileSync(path, 'foo bar baz')
     expect(await editTool.execute({ path, old_string: 'bar', new_string: 'qux' })).toContain('edited')
-    expect(await readTool.execute({ path })).toBe('foo qux baz')
+    expect(await readTool.execute({ path })).toBe('1\tfoo qux baz')
   })
 
   it('errors when old_string is missing', async () => {
@@ -70,12 +76,19 @@ describe('edit tool', () => {
     expect(await editTool.execute({ path, old_string: 'nope', new_string: 'x' })).toContain('not found')
   })
 
+  it('writes replacement patterns like $& literally', async () => {
+    const path = join(tmp, 'a.txt')
+    writeFileSync(path, 'price')
+    await editTool.execute({ path, old_string: 'price', new_string: '$& $` $$' })
+    expect(await readTool.execute({ path })).toBe('1\t$& $` $$')
+  })
+
   it('errors when old_string matches multiple times', async () => {
     const path = join(tmp, 'a.txt')
     writeFileSync(path, 'a a a')
     const result = await editTool.execute({ path, old_string: 'a', new_string: 'b' })
     expect(result).toContain('matches 3 times')
-    expect(await readTool.execute({ path })).toBe('a a a')
+    expect(await readTool.execute({ path })).toBe('1\ta a a')
   })
 })
 
@@ -95,6 +108,12 @@ describe('bash tool', () => {
     const result = await bashTool.execute({ command: 'echo boom 1>&2; exit 3' })
     expect(result).toContain('command failed')
     expect(result).toContain('boom')
+  })
+
+  it('truncates oversized output', async () => {
+    const result = await bashTool.execute({ command: 'yes x | head -c 200000' })
+    expect(result.length).toBeLessThan(200000)
+    expect(result).toContain('truncated')
   })
 
   it('times out long-running commands', async () => {
@@ -150,7 +169,7 @@ describe('filesystem policy enforcement', () => {
     const read = makeRead(policy)
     const outsideFile = join(outside, 'note.txt')
     writeFileSync(outsideFile, 'public data')
-    expect(await read.execute({ path: outsideFile })).toBe('public data')
+    expect(await read.execute({ path: outsideFile })).toBe('1\tpublic data')
 
     const secretsDir = join(tmp, 'secrets')
     mkdirSync(secretsDir)

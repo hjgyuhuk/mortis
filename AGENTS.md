@@ -28,9 +28,9 @@
 4. Effect 可以并发，但 State transition 必须串行且 deterministic（并发执行、按声明顺序提交）
 5. Scope 拥有 Effect 的生命周期，Run 结束必须清理
 6. Agent Core 不知道 TUI、Persistence、具体 Runtime —— UI 与持久化只观察 State/事件
-7. **普通对话历史只追加**：普通事件、中断补齐和 awaiting_user 都只 append。唯一例外是 Main Agent 已授权的 `context_compacted`：Agent 只在 80% 阈值或 `/compact` 时创建私有一次性 lease，Main Agent 单独调用 `compact_context` 后才可替换。它保留连续的根 system 消息，把其余历史替换为一条非信任 user 摘要。该替换不可 undo，不保存 revision。compact persona 只返回数据，不接触 lease、State 或 Effect。
+7. **普通对话历史只追加**：普通事件、中断补齐和 awaiting_user 都只 append。唯一例外是运行时直执行的 `context_compacted`：Agent 只在 80% 阈值或 `/compact` 时创建私有一次性 lease，并直接执行（无模型往返；compact 是容量策略，不是模型意图）。它保留连续的根 system 消息，把前缀历史替换为一条非信任 user 摘要，保留最近 N 条原文（`keepRecentMessages`，默认 8，切分点不落在未应答 tool 调用中间）。该替换不可 undo，不保存 revision；提交前把被替换消息存档到 `latest.pre-compact.json`。compact persona 只返回数据，不接触 lease、State 或 Effect。
 
-职责边界：Model → Decision，Main Agent lease → context_compact Effect，Compact Persona → 摘要数据，Tool → ToolResult，Reducer → 唯一改 State，UI / Persistence → 只观察。
+职责边界：Model → Decision，Agent lease → 运行时直执行 compact，Compact Persona → 摘要数据，Tool → ToolResult，Reducer → 唯一改 State，UI / Persistence → 只观察。
 
 状态保证：任何 `status !== 'running'` 的状态都可直接发送（悬空 tool 调用由 `run_interrupted` / `awaiting_user` 转移补齐合成结果）。
 

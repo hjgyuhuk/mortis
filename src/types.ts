@@ -43,9 +43,8 @@ export interface ToolContext {
 /** A side effect the agent intends to perform. Tools never mutate state. */
 export type Effect =
   | { kind: 'tool_call'; call: ToolCall }
-  /** A lease-authorized request to summarize, then replace active context. */
-  | { kind: 'context_compact'; call: ToolCall; reason: ContextCompactReason }
   // Future kinds slot in here: sub_agent, permission, sleep, human approval.
+  // Context compaction is a runtime-owned direct action, not a model Decision.
 
 /** Why the runtime granted the main agent one context-compact lease. */
 export type ContextCompactReason = 'manual' | 'threshold'
@@ -76,6 +75,8 @@ export type StreamChunk =
   /** Model reasoning (e.g. `reasoning_content` deltas); display-only. */
   | { kind: 'thinking'; delta: string }
   | { kind: 'tool_calls'; tool_calls: ToolCall[] }
+  /** Provider-reported prompt token count for the request just answered. */
+  | { kind: 'usage'; promptTokens: number }
 
 /** The provider abstraction — one method, the streamed chat completion. */
 export interface ChatProvider {
