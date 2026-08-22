@@ -7,11 +7,16 @@
  * skipped instead of crashing. Checkpoints are written by an onTransition
  * observer outside the agent core, so a crash loses at most the transition
  * in flight.
+ *
+ * Each session owns `sessions/<id>.json`; `sessions/index.json` records one
+ * entry per session (title, model, last save) and the latest-session pointer.
+ * The legacy single-slot `latest.json` stays readable as session id 'latest'.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { Message } from './types.js'
 import type { AgentState } from './agent/state.js'
 
@@ -25,12 +30,60 @@ export interface SessionSnapshot {
   savedAt: string
 }
 
+/** One index row per session, updated on every checkpoint. */
+export interface SessionIndexEntry {
+  id: string
+  /** First user message, single line, truncated. */
+  title: string
+  model: string
+  savedAt: string
+}
+
 export function sessionsDir(): string {
   return join(homedir(), '.mortis', 'sessions')
 }
 
-function snapshotPath(): string {
-  return join(sessionsDir(), 'latest.json')
+/** A fresh short session id for a new conversation. */
+export function newSessionId(): string {
+  return randomUUID().replace(/-/g, '').slice(0, 12)
+}
+
+function sessionPath(id: string): string {
+  return id === 'latest' ? join(sessionsDir(), 'latest.json') : join(sessionsDir(), `${id}.json`)
+}
+
+function indexPath(): string {
+  return join(sessionsDir(), 'index.json')
+}
+
+interface SessionIndex {
+  version: 1
+  latestId: string | null
+  sessions: SessionIndexEntry[]
+}
+
+function readIndex(): SessionIndex {
+  try {
+    const parsed = JSON.parse(readFileSync(indexPath(), 'utf8')) as SessionIndex
+    if (parsed.version === 1 && Array.isArray(parsed.sessions)) return parsed
+  } catch {
+    // Missing or corrupt index falls back to an empty one.
+  }
+  return { version: 1, latestId: null, sessions: [] }
+}
+
+function writeIndexAtomic(index: SessionIndex): void {
+  mkdirSync(sessionsDir(), { recursive: true })
+  const temp = indexPath() + '.tmp'
+  writeFileSync(temp, JSON.stringify(index, null, 2) + '\n')
+  renameSync(temp, indexPath())
+}
+
+/** Derive the index title from the first user message. */
+function titleOf(snapshot: SessionSnapshot): string {
+  const first = snapshot.messages.find((message) => message.role === 'user')
+  const text = (first?.content ?? '(empty)').replace(/\s+/g, ' ').trim()
+  return text.length > 60 ? text.slice(0, 60) + '…' : text
 }
 
 /** Project the internal state onto the persistence format. */
@@ -61,9 +114,51 @@ export function hydrateState(snapshot: unknown): AgentState | null {
   return { messages: candidate.messages as Message[], status: 'idle' }
 }
 
-/** Overwrite the latest checkpoint on disk atomically; returns the path written. */
-export function saveSession(snapshot: SessionSnapshot): string {
-  return writeSnapshotAtomic(snapshotPath(), snapshot)
+/**
+ * Write a checkpoint for one session and upsert its index entry, both
+ * atomically. A crash can leave a stale index at worst, never a truncated
+ * file.
+ */
+export function saveSession(snapshot: SessionSnapshot, id: string): string {
+  const path = writeSnapshotAtomic(sessionPath(id), snapshot)
+  const index = readIndex()
+  const entry: SessionIndexEntry = {
+    id,
+    title: titleOf(snapshot),
+    model: snapshot.model,
+    savedAt: snapshot.savedAt,
+  }
+  index.sessions = [entry, ...index.sessions.filter((session) => session.id !== id)]
+  index.latestId = id
+  writeIndexAtomic(index)
+  return path
+}
+
+/** Read one session's latest checkpoint; null when missing or invalid. */
+export function loadSession(id: string): SessionSnapshot | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(sessionPath(id), 'utf8'))
+    return hydrateState(parsed) === null ? null : (parsed as SessionSnapshot)
+  } catch {
+    return null
+  }
+}
+
+/** Index entries, newest save first. */
+export function listSessions(): SessionIndexEntry[] {
+  return readIndex().sessions
+}
+
+/** Id of the most recent session; 'latest' covers the legacy single-slot file. */
+export function latestSessionId(): string | null {
+  if (existsSync(indexPath())) return readIndex().latestId
+  return existsSync(join(sessionsDir(), 'latest.json')) ? 'latest' : null
+}
+
+/** Read the most recent session's checkpoint; null when none exists. */
+export function latestSession(): SessionSnapshot | null {
+  const id = latestSessionId()
+  return id ? loadSession(id) : null
 }
 
 /** Path of the pre-compact forensic archive (one overwrite per compaction). */
@@ -94,17 +189,4 @@ function writeSnapshotAtomic(path: string, snapshot: SessionSnapshot): string {
   writeFileSync(temp, JSON.stringify(snapshot, null, 2) + '\n')
   renameSync(temp, path)
   return path
-}
-
-/** Read the latest checkpoint; null when missing or invalid. */
-export function latestSession(): SessionSnapshot | null {
-  const path = snapshotPath()
-  if (!existsSync(path)) return null
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    if (hydrateState(parsed) === null) return null
-    return parsed as SessionSnapshot
-  } catch {
-    return null
-  }
 }

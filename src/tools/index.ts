@@ -7,10 +7,10 @@
  * Denials are returned as text to the model, never thrown.
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { resolve } from 'node:path'
+import { basename, join, relative, resolve } from 'node:path'
 import type { Tool } from '../types.js'
 import { FilesystemPolicy, openPolicy, type PolicyDecision } from '../fs-policy.js'
 import type { SandboxRunner } from '../sandbox.js'
@@ -60,6 +60,178 @@ function deny(decision: PolicyDecision): string {
   return `error: ${decision.reason ?? 'permission denied'}`
 }
 
+/** Directories never worth searching. */
+const SKIP_DIRS = new Set(['node_modules', '.git'])
+
+/** Cap on files visited by one search — a runaway walk must terminate. */
+const WALK_FILE_CAP = 5000
+
+/** Recursively collect file paths under root, skipping junk and dot directories. */
+async function walkFiles(root: string): Promise<string[]> {
+  const rootStat = await stat(root).catch(() => null)
+  if (!rootStat) return []
+  if (rootStat.isFile()) return [root]
+  const out: string[] = []
+  const queue: string[] = [root]
+  while (queue.length > 0 && out.length < WALK_FILE_CAP) {
+    const dir = queue.shift()!
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) queue.push(full)
+      } else if (entry.isFile()) {
+        out.push(full)
+        if (out.length >= WALK_FILE_CAP) break
+      }
+    }
+  }
+  return out
+}
+
+/** Translate a glob (`*`, `**`, `?`) into an anchored regular expression. */
+export function globToRegExp(glob: string): RegExp {
+  const source = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\0')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\0/g, '.*')
+    .replace(/\?/g, '.')
+  return new RegExp(`^${source}$`)
+}
+
+/** Search file contents with a regular expression; matches are path:line. */
+export function grepTool(policy: FilesystemPolicy): Tool {
+  return {
+    name: 'grep',
+    description:
+      'Search file contents with a JavaScript regular expression. Returns path:line:match rows ' +
+      '(truncated). Skips node_modules and dot directories.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Regular expression to search for.' },
+        path: { type: 'string', description: 'Directory or file to search; defaults to the working directory.' },
+        glob: { type: 'string', description: 'Filename filter, e.g. "*.ts".' },
+        head_limit: { type: 'number', description: 'Maximum number of matches (default 50).' },
+      },
+      required: ['pattern'],
+    },
+    async execute(args) {
+      let regex: RegExp
+      try {
+        regex = new RegExp(String(args.pattern ?? ''))
+      } catch (error) {
+        return `error: invalid pattern: ${(error as Error).message}`
+      }
+      const root = resolve(String(args.path ?? process.cwd()))
+      const rootDecision = policy.check(root, 'read')
+      if (!rootDecision.allowed) return deny(rootDecision)
+      const globRe = args.glob ? globToRegExp(String(args.glob)) : null
+      const limit = Math.min(Math.max(Number(args.head_limit ?? 50) || 50, 1), 500)
+
+      const files = await walkFiles(root)
+      const rows: string[] = []
+      let capped = false
+      for (const file of files) {
+        if (rows.length >= limit) {
+          capped = true
+          break
+        }
+        if (globRe && !globRe.test(basename(file))) continue
+        if (!policy.check(file, 'read').allowed) continue
+        const content = await readFile(file, 'utf8').catch(() => null)
+        if (content === null) continue
+        const fileLines = content.split('\n')
+        for (let i = 0; i < fileLines.length && rows.length < limit; i++) {
+          const line = fileLines[i]!
+          if (regex.test(line)) {
+            rows.push(`${file}:${i + 1}:${line.trim().slice(0, 200)}`)
+          }
+        }
+      }
+      if (rows.length === 0) return '(no matches)'
+      const suffix = capped ? `\n... (capped at ${limit} matches)` : ''
+      return truncateOutput(rows.join('\n')) + suffix
+    },
+  }
+}
+
+/** Find files by glob pattern, most recently modified first. */
+export function globTool(policy: FilesystemPolicy): Tool {
+  return {
+    name: 'glob',
+    description:
+      'Find files by glob pattern ("*", "**", "?"), e.g. "src/**/*.ts". Returns matching paths, ' +
+      'most recently modified first. Skips node_modules and dot directories.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Glob pattern, matched against paths relative to the search root.' },
+        path: { type: 'string', description: 'Directory to search; defaults to the working directory.' },
+        head_limit: { type: 'number', description: 'Maximum number of results (default 100).' },
+      },
+      required: ['pattern'],
+    },
+    async execute(args) {
+      const globRe = globToRegExp(String(args.pattern ?? ''))
+      const root = resolve(String(args.path ?? process.cwd()))
+      const rootDecision = policy.check(root, 'read')
+      if (!rootDecision.allowed) return deny(rootDecision)
+      const limit = Math.min(Math.max(Number(args.head_limit ?? 100) || 100, 1), 1000)
+
+      const files = await walkFiles(root)
+      const matches: Array<{ path: string; mtime: number }> = []
+      for (const file of files) {
+        const rel = relative(root, file)
+        if (!globRe.test(rel) && !globRe.test(basename(file))) continue
+        const info = await stat(file).catch(() => null)
+        matches.push({ path: rel, mtime: info?.mtimeMs ?? 0 })
+        if (matches.length >= limit * 5) break
+      }
+      if (matches.length === 0) return '(no matches)'
+      const rows = matches
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, limit)
+        .map((match) => match.path)
+      return truncateOutput(rows.join('\n'))
+    },
+  }
+}
+
+/** A user-approval request for a risky tool execution. */
+export interface ApprovalRequest {
+  tool: 'write' | 'edit' | 'bash'
+  /** One-line summary, e.g. the target path. */
+  title: string
+  /** What exactly would happen: the command, or the replacement preview. */
+  detail: string
+}
+
+/** Decides whether a risky tool execution may proceed. */
+export type ApprovalGate = (request: ApprovalRequest) => Promise<boolean>
+
+/** A missing gate approves; a gate that throws rejects. */
+async function approved(gate: ApprovalGate | undefined, request: ApprovalRequest): Promise<boolean> {
+  if (!gate) return true
+  try {
+    return await gate(request)
+  } catch {
+    return false
+  }
+}
+
+/** First-line preview of a replacement pair, for the approval dialog. */
+function preview(text: string, max = 200): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  return line.length > max ? line.slice(0, max) + '…' : line
+}
+
 /** Read a file's contents as numbered lines, paged by offset. */
 export function readTool(policy: FilesystemPolicy): Tool {
   return {
@@ -96,7 +268,7 @@ export function readTool(policy: FilesystemPolicy): Tool {
 }
 
 /** Write a file, overwriting any existing content. */
-export function writeTool(policy: FilesystemPolicy): Tool {
+export function writeTool(policy: FilesystemPolicy, gate?: ApprovalGate): Tool {
   return {
     name: 'write',
     description:
@@ -114,6 +286,9 @@ export function writeTool(policy: FilesystemPolicy): Tool {
       const content = String(args.content)
       const decision = policy.check(path, 'write')
       if (!decision.allowed) return deny(decision)
+      if (!(await approved(gate, { tool: 'write', title: `write ${path}`, detail: `${content.length} bytes, overwriting any existing file` }))) {
+        return `error: the user rejected writing ${path}`
+      }
       try {
         await writeFile(path, content, 'utf8')
         return `wrote ${path} (${content.length} bytes)`
@@ -125,7 +300,7 @@ export function writeTool(policy: FilesystemPolicy): Tool {
 }
 
 /** Apply a string replacement to a file. The match must be unique. */
-export function editTool(policy: FilesystemPolicy): Tool {
+export function editTool(policy: FilesystemPolicy, gate?: ApprovalGate): Tool {
   return {
     name: 'edit',
     description:
@@ -145,6 +320,10 @@ export function editTool(policy: FilesystemPolicy): Tool {
       const newString = String(args.new_string)
       const decision = policy.check(path, 'write')
       if (!decision.allowed) return deny(decision)
+      const detail = `- ${preview(oldString)}\n+ ${preview(newString)}`
+      if (!(await approved(gate, { tool: 'edit', title: `edit ${path}`, detail }))) {
+        return `error: the user rejected editing ${path}`
+      }
       try {
         const content = await readFile(path, 'utf8')
         const matches = content.split(oldString).length - 1
@@ -166,7 +345,7 @@ export function editTool(policy: FilesystemPolicy): Tool {
 }
 
 /** Run a shell command and capture its output. Commands time out. */
-export function bashTool(policy: FilesystemPolicy, sandbox?: SandboxRunner | null): Tool {
+export function bashTool(policy: FilesystemPolicy, sandbox?: SandboxRunner | null, gate?: ApprovalGate): Tool {
   return {
     name: 'bash',
     description: sandbox
@@ -191,6 +370,9 @@ export function bashTool(policy: FilesystemPolicy, sandbox?: SandboxRunner | nul
         BASH_MAX_TIMEOUT_S,
       )
       const exec = sandbox ? sandbox.wrap(command) : { file: '/bin/sh', args: ['-c', command] }
+      if (!(await approved(gate, { tool: 'bash', title: 'bash', detail: command }))) {
+        return `error: the user rejected running: ${command}`
+      }
       try {
         const { stdout, stderr } = await execFileAsync(exec.file, exec.args, {
           cwd,
@@ -209,9 +391,16 @@ export function bashTool(policy: FilesystemPolicy, sandbox?: SandboxRunner | nul
   }
 }
 
-/** All built-in tools, bound to the given policy (and optional sandbox). */
-export function createBuiltinTools(policy: FilesystemPolicy, sandbox?: SandboxRunner | null): Tool[] {
-  return [readTool(policy), writeTool(policy), editTool(policy), bashTool(policy, sandbox)]
+/** All built-in tools, bound to the given policy (and optional sandbox/gate). */
+export function createBuiltinTools(policy: FilesystemPolicy, sandbox?: SandboxRunner | null, gate?: ApprovalGate): Tool[] {
+  return [
+    readTool(policy),
+    writeTool(policy, gate),
+    editTool(policy, gate),
+    bashTool(policy, sandbox, gate),
+    grepTool(policy),
+    globTool(policy),
+  ]
 }
 
 /** Permissive default (everything read-write); the CLI always builds a real policy. */

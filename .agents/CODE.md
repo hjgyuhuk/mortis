@@ -68,14 +68,15 @@ Persona
 
 CLI
 ├── builds → Config → ContextRuntime → FilesystemPolicy → Sandbox → bound Tools
-├── wires → Agent, TUI, Session, and transition checkpointing
-└── dispatches → `/planner`, lease-requesting `/compact`, and model-side `persona`
+├── wires → Agent, TUI, Session, transition checkpointing, and the approval gate
+└── dispatches → `/planner`, `/compact`, `/sessions`, `/resume <id>`, and model-side `persona`
 
 Session
 ├── serializes → SessionSnapshot{version:1}
-├── checkpoints → latest.json atomically (temp file + rename)
+├── stores → one `<id>.json` per session + index.json (title, latest pointer)
+├── checkpoints → atomically (temp file + rename)
 ├── archives → latest.pre-compact.json before each compaction commit
-└── resumes → `--continue` with status reset to idle
+└── resumes → `--continue` (latest) or `/resume <id>`, status reset to idle
 
 AgentTui
 ├── consumes → domain AgentEvent

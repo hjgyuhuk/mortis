@@ -143,7 +143,14 @@ The file remains JSON. The TOML-style names `api_key`, `base_url`, and
 | Model | `--model` | `MORTIS_MODEL` | `gpt-4o-mini` |
 | API Key | `--api-key` | `MORTIS_API_KEY` | none |
 | Thinking effort | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | not sent |
+| Permission mode | `--permission-mode default\|acceptEdits\|yolo` | — | `default` |
 | TUI | `--plain` disables | — | enabled |
+
+In interactive mode, `/sessions` lists saved sessions and `/resume <id>`
+continues one. With the default permission mode, writes and shell commands
+ask for approval in a dialog (`acceptEdits` only gates bash, `yolo` gates
+nothing); approved commands are remembered for the session. Non-interactive
+runs execute without approval prompts.
 
 ## Context compact
 

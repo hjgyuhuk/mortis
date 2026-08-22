@@ -41,6 +41,9 @@ description: Dynamic progress, lessons learned, and next steps.
 * [Persona budget] `buildCompactionTask` truncates oldest prefix messages to fit `compactorTokenLimit`; throws when nothing fits. [Verification Proof: truncation and overflow tests]
 * [Pre-compact archive] `savePreCompactArchive` writes `latest.pre-compact.json` atomically via the injected `onBeforeCompact` observer. [Verification Proof: archive observer + session tests]
 * [Stale usage reset] `lastPromptTokens` resets at compaction commit; a manual compaction no longer seeds a spurious threshold lease. [Verification Proof: stale-token regression test]
+* [Search tools] `grep` (regex + glob filter + head_limit, policy-checked) and `glob` (pattern → files, mtime-sorted) walk the tree skipping node_modules/dot dirs; system prompt points the model at them first. [Verification Proof: grep/glob tool tests]
+* [Approval gate] write/edit/bash accept an `ApprovalGate`; interactive TUI asks via ask_user per `--permission-mode`, approved bash commands are remembered for the session, non-interactive runs run unattended. [Verification Proof: gate reject/approve tests]
+* [Multi-session] Sessions live in `<id>.json` with an atomic index (title from first user message, latest pointer); `/sessions` lists, `/resume <id>` swaps Agent state via `Agent.resume`; legacy `latest.json` stays readable as id 'latest'. [Verification Proof: index/legacy/fallback session tests]
 
 ## In Progress
 
@@ -81,4 +84,4 @@ description: Dynamic progress, lessons learned, and next steps.
 
 # Immediate Next Steps
 
-* Review and commit the context-compaction rework diff.
+* Review and commit the daily-usability diff.

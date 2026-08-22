@@ -142,7 +142,12 @@ Persona frontmatter 使用相同模型别名。顶层 `model` 写实际模型时
 | 模型 | `--model` | `MORTIS_MODEL` | `gpt-4o-mini` |
 | API Key | `--api-key` | `MORTIS_API_KEY` | 无 |
 | 思考强度 | `--thinking-effort` | `MORTIS_THINKING_EFFORT` | 不发送 |
+| 权限模式 | `--permission-mode default\|acceptEdits\|yolo` | — | `default` |
 | TUI | `--plain` 禁用 | — | TTY 下启用 |
+
+交互模式中，`/sessions` 列出已保存会话，`/resume <id>` 恢复指定会话。默认权限
+模式下写文件与 shell 命令会在对话框中请求批准（`acceptEdits` 只管 bash，
+`yolo` 全部放行）；同一会话内已批准的命令不再重复询问。非交互运行不做审批。
 
 ## Context Compact
 

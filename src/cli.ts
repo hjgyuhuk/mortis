@@ -10,11 +10,11 @@ import { parseArgs } from 'node:util'
 import { readFileSync } from 'node:fs'
 import { Agent } from './agent/loop.js'
 import { OpenAIProvider } from './provider/openai.js'
-import { createBuiltinTools, askUserTool } from './tools/index.js'
+import { createBuiltinTools, askUserTool, type ApprovalGate } from './tools/index.js'
 import { configPath, defaultSystemPrompt, ensureFileConfig, resolveConfig, resolveModelRef, writeFileConfig, type Config, type ResolvedModel } from './config.js'
 import { AgentTui } from './tui/index.js'
 import { findGitRoot, loadAgentsMd } from './instructions.js'
-import { hydrateState, latestSession, savePreCompactArchive, saveSession, serializeState } from './session.js'
+import { hydrateState, latestSession, latestSessionId, listSessions, loadSession, newSessionId, savePreCompactArchive, saveSession, serializeState } from './session.js'
 import type { AgentState } from './agent/state.js'
 import type { Message } from './types.js'
 import { FilesystemPolicy, mergeRules, parseRules, type FsRule } from './fs-policy.js'
@@ -45,10 +45,20 @@ function parseCliArgs(argv: string[]) {
       'fs-r': { type: 'string', multiple: true } as const,
       'fs-deny': { type: 'string', multiple: true } as const,
       'no-sandbox': { type: 'boolean' } as const,
+      'permission-mode': { type: 'string' } as const,
     },
     allowPositionals: true,
   })
   return { values: parsed.values, prompt: positionalsOf(parsed) }
+}
+
+/** How much the user wants to approve in the interactive TUI. */
+type PermissionMode = 'default' | 'acceptEdits' | 'yolo'
+
+function parsePermissionMode(value: string | undefined): PermissionMode {
+  if (value === undefined) return 'default'
+  if (value === 'default' || value === 'acceptEdits' || value === 'yolo') return value
+  throw new Error(`invalid --permission-mode "${value}" (use default, acceptEdits, or yolo)`)
 }
 
 function positionalsOf(parsed: { positionals: string[] }): string {
@@ -77,6 +87,8 @@ function usage(): string {
     '  --fs-r <dir>       Grant read-only on a directory (repeatable)',
     '  --fs-deny <dir>    Deny all access on a directory (repeatable)',
     '  --no-sandbox       Disable the OS sandbox for bash (dangerous)',
+    '  --permission-mode <mode>  default: approve writes and bash in the TUI;',
+    '                     acceptEdits: only bash needs approval; yolo: approve nothing',
     '  --init             Write a config file to ~/.mortis/config.json',
     '  -h, --help         Show this help',
   ].join('\n')
@@ -177,6 +189,7 @@ async function main() {
   })
   const sandboxEnabled = values['no-sandbox'] ? false : (config.filesystem?.sandbox ?? true)
   const sandbox = createSandbox(policy, sandboxEnabled)
+  const permissionMode = parsePermissionMode(values['permission-mode'])
   const tools = createBuiltinTools(policy, sandbox)
   const sandboxNote = sandbox
     ? 'Shell commands run inside an OS sandbox: writes are confined to the writable directories above and denied directories are unreadable.'
@@ -192,9 +205,11 @@ async function main() {
 
   // Session resume + checkpointing: persistence observes state transitions
   // from outside the agent core, so a crash loses at most one transition.
+  // A resumed run keeps writing to the session it resumed.
+  const sessionId: string = values.continue ? (latestSessionId() ?? newSessionId()) : newSessionId()
   const resumedState: AgentState | null = values.continue ? hydrateState(latestSession()) : null
   const checkpoint = (state: AgentState): void => {
-    saveSession(serializeState(state, mainModel.alias))
+    saveSession(serializeState(state, mainModel.alias), sessionId)
   }
 
   // Interactive mode: `pnpm dev` with no prompt drops straight into the TUI,
@@ -207,8 +222,20 @@ async function main() {
     })
     // Only the interactive TUI can answer questions, so ask_user exists here.
     // Personas are user-editable markdown files under ~/.mortis/persona.
+    // The approval gate reuses the same dialog: writes and bash need a yes
+    // unless the mode says otherwise; approved bash commands are remembered.
+    const approvedBash = new Set<string>()
+    const gate: ApprovalGate | undefined = permissionMode === 'yolo'
+      ? undefined
+      : async (request) => {
+          if (permissionMode === 'acceptEdits' && request.tool !== 'bash') return true
+          if (request.tool === 'bash' && approvedBash.has(request.detail)) return true
+          const choice = await tui.askUser(`Allow ${request.title}?\n\n${request.detail}`, ['Approve', 'Reject'])
+          if (choice === 'Approve' && request.tool === 'bash') approvedBash.add(request.detail)
+          return choice === 'Approve'
+        }
     const interactiveTools = [
-      ...tools,
+      ...createBuiltinTools(policy, sandbox, gate),
       askUserTool((question, options) => tui.askUser(question, options)),
       personaTool(personaProvider, callablePersonas),
     ]
@@ -228,7 +255,30 @@ async function main() {
     // direct action; everything else is a normal agent run. Cancellation is
     // unified across all phases.
     let cancelCurrent: (() => void) | null = null
+    let activeSessionId = sessionId
     const runPrompt = async (prompt: string): Promise<string> => {
+      if (prompt.trim() === '/sessions') {
+        const sessions = listSessions()
+        if (sessions.length === 0) return 'No saved sessions.'
+        return sessions
+          .map((session) => {
+            const marker = session.id === activeSessionId ? '*' : ' '
+            const when = session.savedAt.slice(0, 16).replace('T', ' ')
+            return `${marker} ${session.id}  ${when}  ${session.title}`
+          })
+          .join('\n')
+      }
+      if (prompt.startsWith('/resume')) {
+        const id = prompt.slice('/resume'.length).trim()
+        if (!id) return 'Usage: `/resume <id>` — list ids with /sessions.'
+        const snapshot = loadSession(id)
+        if (!snapshot) return `No session "${id}".`
+        const state = hydrateState(snapshot)
+        if (!state) return `Session "${id}" is unreadable.`
+        agent.resume(state)
+        activeSessionId = id
+        return `Resumed session ${id}. The conversation continues from its saved history.`
+      }
       if (prompt.trim() === '/compact') {
         cancelCurrent = () => agent.abort('user interrupt')
         try {

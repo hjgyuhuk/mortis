@@ -7,7 +7,11 @@ import {
   editTool as makeEdit,
   readTool as makeRead,
   writeTool as makeWrite,
+  grepTool as makeGrep,
+  globTool as makeGlob,
   createBuiltinTools,
+  globToRegExp,
+  type ApprovalRequest,
 } from '../src/tools/index.js'
 import { FilesystemPolicy, openPolicy, type FsRule } from '../src/fs-policy.js'
 
@@ -138,6 +142,91 @@ describe('bash tool', () => {
   }, 10_000)
 })
 
+describe('grep tool', () => {
+  const grepTool = makeGrep(openPolicy())
+
+  it('returns path:line matches for a regex', async () => {
+    writeFileSync(join(tmp, 'a.ts'), 'const alpha = 1\nconst beta = 2\n')
+    const result = await grepTool.execute({ pattern: 'alpha', path: tmp })
+    expect(result).toContain(`${join(tmp, 'a.ts')}:1:`)
+    expect(result).toContain('const alpha = 1')
+  })
+
+  it('filters by glob and caps matches', async () => {
+    writeFileSync(join(tmp, 'a.ts'), 'hit\n')
+    writeFileSync(join(tmp, 'b.md'), 'hit\n')
+    const filtered = await grepTool.execute({ pattern: 'hit', path: tmp, glob: '*.md' })
+    expect(filtered).toContain('b.md')
+    expect(filtered).not.toContain('a.ts')
+
+    writeFileSync(join(tmp, 'c.txt'), 'hit\nhit\nhit\n')
+    const capped = await grepTool.execute({ pattern: 'hit', path: tmp, head_limit: 2 })
+    expect(capped).toContain('capped at 2')
+  })
+
+  it('reports invalid patterns and denied roots', async () => {
+    expect(await grepTool.execute({ pattern: '(' })).toContain('invalid pattern')
+    const locked = new FilesystemPolicy({ workspaceRoot: join(tmp, 'ws'), rules: [{ path: tmp, access: 'deny' }] })
+    const denied = await makeGrep(locked).execute({ pattern: 'x', path: tmp })
+    expect(denied).toContain('permission denied')
+  })
+})
+
+describe('glob tool', () => {
+  const globTool = makeGlob(openPolicy())
+
+  it('matches nested paths and bare suffixes', async () => {
+    mkdirSync(join(tmp, 'sub'), { recursive: true })
+    writeFileSync(join(tmp, 'a.ts'), '')
+    writeFileSync(join(tmp, 'sub', 'b.ts'), '')
+    writeFileSync(join(tmp, 'c.md'), '')
+
+    const ts = await globTool.execute({ pattern: '*.ts', path: tmp })
+    expect(ts).toContain('a.ts')
+    expect(ts).toContain(join('sub', 'b.ts'))
+    expect(ts).not.toContain('c.md')
+
+    const nested = await globTool.execute({ pattern: 'sub/*.ts', path: tmp })
+    expect(nested).toContain(join('sub', 'b.ts'))
+    expect(nested).not.toContain('a.ts')
+  })
+
+  it('translates glob metacharacters', () => {
+    expect(globToRegExp('*.ts').test('a.ts')).toBe(true)
+    expect(globToRegExp('*.ts').test('a/b.ts')).toBe(false)
+    expect(globToRegExp('**/*.ts').test('a/b.ts')).toBe(true)
+    expect(globToRegExp('a?c').test('abc')).toBe(true)
+    expect(globToRegExp('a.c').test('abc')).toBe(false)
+  })
+})
+
+describe('approval gate', () => {
+  it('blocks write/edit/bash when the gate rejects', async () => {
+    const gate = async (): Promise<boolean> => false
+    const write = makeWrite(openPolicy(), gate)
+    const edit = makeEdit(openPolicy(), gate)
+    const bash = makeBash(openPolicy(), null, gate)
+
+    expect(await write.execute({ path: join(tmp, 'a.txt'), content: 'x' })).toContain('the user rejected writing')
+    expect(await edit.execute({ path: join(tmp, 'a.txt'), old_string: 'a', new_string: 'b' })).toContain('the user rejected editing')
+    expect(await bash.execute({ command: 'echo hi' })).toContain('the user rejected running')
+  })
+
+  it('passes request details and lets approvals through', async () => {
+    const requests: ApprovalRequest[] = []
+    const gate = async (request: ApprovalRequest): Promise<boolean> => {
+      requests.push(request)
+      return true
+    }
+    const write = makeWrite(openPolicy(), gate)
+    const path = join(tmp, 'ok.txt')
+
+    expect((await write.execute({ path, content: 'x' })).startsWith('wrote')).toBe(true)
+    expect(requests[0]).toMatchObject({ tool: 'write', title: `write ${path}` })
+    expect(await readTool.execute({ path })).toBe('1\tx')
+  })
+})
+
 describe('filesystem policy enforcement', () => {
   function restrictedPolicy(rules: FsRule[] = []) {
     const workspace = join(tmp, 'ws')
@@ -209,10 +298,10 @@ describe('filesystem policy enforcement', () => {
     expect((await bash.execute({ command: 'echo ok' })).trim()).toBe('ok')
   })
 
-  it('createBuiltinTools binds all four tools to the policy', () => {
+  it('createBuiltinTools binds all six tools to the policy', () => {
     const { policy } = restrictedPolicy()
     const tools = createBuiltinTools(policy)
-    expect(tools.map((tool) => tool.name)).toEqual(['read', 'write', 'edit', 'bash'])
+    expect(tools.map((tool) => tool.name)).toEqual(['read', 'write', 'edit', 'bash', 'grep', 'glob'])
   })
 })
 

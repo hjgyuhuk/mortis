@@ -82,12 +82,17 @@ export {
 export {
   hydrateState,
   latestSession,
+  latestSessionId,
+  listSessions,
+  loadSession,
+  newSessionId,
   preCompactArchivePath,
   savePreCompactArchive,
   saveSession,
   serializeState,
   sessionsDir,
   SNAPSHOT_VERSION,
+  type SessionIndexEntry,
   type SessionSnapshot,
 } from './session.js'
 export type {

@@ -143,6 +143,15 @@ export class Agent {
   }
 
   /**
+   * Load a hydrated session state outside a run — the runtime-level session
+   * switch, mirroring what the constructor does with `options.state`.
+   */
+  resume(state: AgentState): void {
+    if (this.currentRun) throw new Error('cannot resume while an agent run is active')
+    this.state = state
+  }
+
+  /**
    * Let an interactive user request compaction. The runtime executes the
    * leased direct action itself — no model round-trip; the command never
    * enters State.

@@ -28,7 +28,7 @@ description: Static system invariants, architecture.
 - [Events] Domain events are concrete discriminated unions.
 - [Cancellation] AbortError maps to RunInterruptedError at the agent boundary and becomes a UI notice.
 - [Config] API keys never persist during automatic config creation. Explicit `--init` may write one.
-- [Snapshot] Session snapshots use version 1, reject unknown versions, and write atomically via a temp file plus rename.
+- [Snapshot] Session snapshots use version 1, reject unknown versions, and write atomically via a temp file plus rename. Sessions live in `<id>.json` files with an index; the legacy `latest.json` remains readable.
 
 # Critical Environment & Boundaries
 
@@ -36,6 +36,7 @@ description: Static system invariants, architecture.
 - [Provider] `OpenAIProvider` supports SSE and non-SSE JSON responses, preserves non-success HTTP status in `ProviderHttpError`, and retries connection-phase failures (network, 429, 5xx) with backoff; a started stream never retries.
 - [Context] Preflight prefers the provider's last reported `prompt_tokens`, falling back to the conservative UTF-8 JSON byte estimate at 80% of `maxInputSize`, or `maxContextSize - maxOutputSize`. Missing metadata disables preflight. Provider context-limit errors do not compact or retry.
 - [TUI] Interactive mode uses pi-tui AltScreen with a scrolling transcript and multiline Editor.
+- [Approval] Interactive runs gate write/edit/bash through an ask_user dialog per `--permission-mode` (default | acceptEdits | yolo); non-interactive runs run unattended.
 - [Filesystem] Read, write, and edit enforce FilesystemPolicy. Workspace and scratch are writable by default.
 - [Sandbox] Bash uses Seatbelt on macOS or bubblewrap on Linux when available. The CLI reports unsandboxed fallback honestly.
 - [Config] Config lives under `~/.mortis`. Resolution order is CLI > environment > file > defaults.

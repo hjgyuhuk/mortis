@@ -6,7 +6,7 @@
 
 - `src/types.ts` — 共享类型（Message / Tool / ToolContext / Decision / Effect / ChatProvider），映射 OpenAI wire 格式
 - `src/provider/openai.ts` — OpenAI API 兼容供应商（SSE 流解析 + tool-call 缝合 + HTTP 状态错误）
-- `src/tools/index.ts` — 内置工具 read / write / edit / bash（工厂 `createBuiltinTools(policy)`）+ ask_user（交互模式询问面板）
+- `src/tools/index.ts` — 内置工具 read / write / edit / bash / grep / glob（工厂 `createBuiltinTools(policy, sandbox?, gate?)`）+ ask_user（交互模式询问面板）；write/edit/bash 可选审批门 `ApprovalGate`
 - `src/fs-policy.ts` — 文件系统五区权限（custom 最高 > secrets > workspace > scratch > outside）
 - `src/sandbox.ts` — bash 的 OS 级沙箱（darwin: sandbox-exec/Seatbelt；linux: bwrap；不可用则如实降级）
 - `src/context.ts` — context compact direct action、容量估算、非信任摘要边界
@@ -14,7 +14,7 @@
 - `src/agent/loop.ts` — Agent 循环（think → act）+ `RunInterruptedError`
 - `src/agent/scope.ts` — 父链取消 Scope（Agent > Run > Effect 层次）
 - `src/agent/events.ts` — Domain 事件（UI 语义不进这里）
-- `src/session.ts` — 版本化 `SessionSnapshot` + latest checkpoint
+- `src/session.ts` — 版本化 `SessionSnapshot` + 多会话存储（`<id>.json` + `index.json`，兼容旧 `latest.json`）
 - `src/persona.ts` — Persona 认知角色（无工具、单次完成、结构化 Evidence；默认生成 planner.md 与 compact.md；`/planner` 用户入口 + 模型侧 persona 工具）
 - `src/tui/index.ts` — pi-tui 终端 UI；交互模式用 TuiAltScreen 聊天布局（ScrollView transcript + 多行 Editor 输入框），单次模式用 TuiMainScreen
 - `src/cli.ts` — CLI 入口；无 prompt 参数且非 --plain 时进交互 TUI
@@ -46,7 +46,7 @@
 
 ## 命令
 
-- `pnpm dev` — 交互式 TUI（Esc 或 Ctrl+C 中断运行中的回合并保留会话，空闲时 Ctrl+C 退出；/q 或 Ctrl+D 退出）；`pnpm dev <prompt>` — 单次运行；`--plain` 关闭 TUI
+- `pnpm dev` — 交互式 TUI（Esc 或 Ctrl+C 中断运行中的回合并保留会话，空闲时 Ctrl+C 退出；/q 或 Ctrl+D 退出；/sessions 列会话、/resume <id> 恢复；`--permission-mode default|acceptEdits|yolo` 控制写/命令审批）；`pnpm dev <prompt>` — 单次运行；`--plain` 关闭 TUI
 - `pnpm dev --continue` — 恢复最近一次会话（~/.mortis/sessions/latest.json）
 - `pnpm build` — tsc 编译到 dist/
 - `pnpm typecheck` — 类型检查（src + test）
